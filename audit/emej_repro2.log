@@ -1,0 +1,21 @@
+/home/z/my-project/emej-audit/6.py:368: RuntimeWarning: The iteration is not making good progress, as measured by the 
+ improvement from the last five Jacobian evaluations.
+  sol = fsolve(res, x0, xtol=1e-10, maxfev=6000)
+/home/z/my-project/emej-audit/6.py:368: RuntimeWarning: The iteration is not making good progress, as measured by the 
+ improvement from the last ten iterations.
+  sol = fsolve(res, x0, xtol=1e-10, maxfev=6000)
+==========================================================================
+6.py — 中型保真桥接：二体引力辅助序列 → 精确力模型 → GMAT 数据
+==========================================================================
+星历: JPL DE421
+序列: audit/emej_nodes_repro.json
+  [flyby 1/2] mars t=60733.6556 rp=3742.1 km vi=10.660 vo=10.660 δ=10.50° tin=0.62 d tout=0.62 d
+  [flyby 2/2] earth t=61391.1302 rp=9532.4 km vi=14.055 vo=14.055 δ=20.12° tin=0.75 d tout=0.75 d
+         (leg0 DSM @60611.151, |Δv_dsm|=1841.9 m/s)
+  [leg0] earth->mars  Δv=(5.86, 12.54, 0.73) m/s |13.9|  BT=-3924.9 BR=1191.3 τ=53962 s rp=3742.1 km
+         (leg1 DSM @60998.115, |Δv_dsm|=456.1 m/s)
+  [leg1] mars->earth  Δv=(-4.35, 6.83, -0.39) m/s |8.1|  BT=11368.9 BR=331.2 τ=65220 s rp=9532.4 km
+         (leg2 DSM @62428.739, |Δv_dsm|=102.4 m/s)
+  [leg2] ->jupiter  Δv=(-1.79, 18.29, 1.06) m/s |18.4|  交会残差 1.729 km
+  出发历元修正 +0.000 d；总 Δv = 40.4 m/s
+CSV: audit/emej_repro2.csv  (frame=SunMJ2000Eq, 11 events)
