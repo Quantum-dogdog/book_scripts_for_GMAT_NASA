@@ -1,0 +1,59 @@
+# step6 GMAT bridge: patched-conic MGA -> precise ephemeris -> GMAT input table
+# body sequence: earth(departure) -> venus(rp=11336.2 km) -> earth(rp=10622.0 km) -> earth(rp=7368.0 km) -> jupiter
+# ephemeris: JPL DE421 (.bsp via jplephem.spk)
+# time: internal MJD is TDB. epoch_mjd is a legacy alias of epoch_mjd_tdb.
+#       UTC = TDB - 69.184 s (TT-UTC; TDB-TT ~1.6 ms neglected).
+#       GMAT: Sat.DateFormat = TDBGregorian; Sat.Epoch = epoch_tdb;
+#       or Sat.DateFormat = UTCGregorian; Sat.Epoch = epoch_utc.
+# frame: heliocentric x/y/z,vx/vy/vz and dv are SunMJ2000Eq
+#        (Origin=Sun, Axes=MJ2000Eq; state_frame is the frame label, create it
+#        in GMAT under any free name, e.g. HelioMJ2000Eq). rel_* are body-centered
+#        in <Body>MJ2000Eq.
+#        Do NOT use Axes=BodyInertial for the Sun: the Sun IAU pole differs
+#        from Earth's J2000 pole by ~26 deg; SunXyz would rotate every vector.
+# B-plane: BT_body_km/BR_body_km are GMAT BdotT/BdotR in <Body>MJ2000Eq
+#          (i.e. CoordinateSystem.Origin=<Body>, Axes=BodyInertial).
+#          (T = S x Z_body, R = S x T; S = incoming asymptote).
+#          BT_sunEq_km/BR_sunEq_km use the same target-centered B vector
+#          projected on SunMJ2000Eq axes (T = S x Z_earth); axes cross-check only.
+#          sign check: GMAT versions differ in the BdotT/BdotR sign convention;
+#          compare one flyby; if both signs flip, negate BT/BR consistently.
+#          BT_target_* = design target; BT_* = achieved by the bridge TCM.
+#          BT_km/BR_km/tau_s/rp_km are the legacy internal-ecliptic values (audit only).
+# force model: point masses only; no Moon, drag, SRP, harmonics, relativity.
+#          fm_point_masses = GMAT PointMasses; fm_central_body = GMAT CentralBody.
+#          flyby_periapsis: CentralBody=<Body>, PointMasses={} (two-body hyperbola).
+# burns: burn_semantics says whether the row state is pre- or post-burn.
+#        pre_burn: apply dv at burn_epoch (= row epoch).
+#        post_burn: row state already includes dv; pre = state - dv.
+#        post_burn_at_earlier_epoch: dv was applied at burn_epoch, not at this row epoch.
+# departure: row state is post-TCM; burn_epoch is t0 (earlier than the row epoch).
+# flyby_entry: use BT_target_body_km/BR_target_body_km as GMAT Achieve targets;
+#             BT_body_km/BR_body_km are the values achieved by the bridge TCM.
+# GMAT setup:
+#   Create CoordinateSystem HelioMJ2000Eq; HelioMJ2000Eq.Origin = Sun;
+#   HelioMJ2000Eq.Axes = MJ2000Eq;   % use any free name; NOT BodyInertial
+#   Create ForceModel FM; FM.CentralBody = Sun; FM.PrimaryBodies = {Sun};
+#   FM.PointMasses = {Mercury, Venus, Earth, Jupiter, Saturn};
+#   FM.Drag = None; FM.SRP = Off; FM.RelativisticCorrection = Off;
+#   Create ImpulsiveBurn TCM; TCM.CoordinateSystem = HelioMJ2000Eq;
+#   TCM.Element1 = dvx_km_s; TCM.Element2 = dvy_km_s; TCM.Element3 = dvz_km_s;
+# B-plane target in GMAT:
+#   Create CoordinateSystem MarsFlyby; MarsFlyby.Origin = Mars;
+#   MarsFlyby.Axes = BodyInertial;
+#   Achieve DC1(Sat.MarsFlyby.BdotT = BT_target_body_km, {Tolerance = 0.1});
+#   Achieve DC1(Sat.MarsFlyby.BdotR = BR_target_body_km, {Tolerance = 0.1});
+# departure epoch correction: +0.0000 d vs low-fidelity sequence
+#
+leg,event,body,state_origin,state_frame,rel_body,rel_frame,fm_central_body,fm_point_masses,fm_exclude,epoch_mjd,epoch_mjd_tdb,epoch_tdb,epoch_mjd_utc,epoch_utc,x_km,y_km,z_km,vx_km_s,vy_km_s,vz_km_s,rel_x_km,rel_y_km,rel_z_km,rel_vx_km_s,rel_vy_km_s,rel_vz_km_s,burn_type,burn_semantics,burn_epoch_mjd_tdb,burn_epoch_tdb,burn_epoch_mjd_utc,burn_epoch_utc,dvx_km_s,dvy_km_s,dvz_km_s,dv_km_s,BT_km,BR_km,tau_s,rp_km,BT_body_km,BR_body_km,B_body_km,tau_body_s,rp_actual_km,vinf_actual_km_s,BT_target_body_km,BR_target_body_km,tau_target_s,rp_target_km,vinf_target_km_s,BT_sunEq_km,BR_sunEq_km,BT_target_sunEq_km,BR_target_sunEq_km,miss_km,note
+0,departure,earth,Sun,SunMJ2000Eq,earth,EarthMJ2000Eq,Sun,Mercury;Mars;Jupiter;Saturn,Venus;Earth,46100.268479837,46100.268479837,04 Feb 1985 06:26:36.657,46100.267679096,04 Feb 1985 06:25:27.473,-104813570.852570,94699920.070668,41670290.947575,-18.545663795,-19.404179166,-5.430168158,565406.914240,45860.304344,629491.697200,2.769961530,0.220511093,3.079539479,departure_tcm,post_burn_at_earlier_epoch; do_not_reapply,46097.905505407,01 Feb 1985 21:43:55.667,46097.904704666,01 Feb 1985 21:42:46.483,-0.013977624,0.030017742,-0.018723710,0.038039665,,,,,,,,,,,,,,,,,,,,,post-TCM heliocentric state on the departure-leg conic; Earth/Mars excluded; TCM applied at burn_epoch (earlier); do not re-apply; rel state is Earth-centered (may be inside SOI)
+0,flyby_entry,venus,Sun,SunMJ2000Eq,venus,VenusMJ2000Eq,Sun,Mercury;Mars;Jupiter;Saturn,Venus;Earth,46255.055633690,46255.055633690,09 Jul 1985 01:20:06.750,46255.054832949,09 Jul 1985 01:18:57.566,105401945.178557,-19929634.172414,-15242109.637935,11.690132911,33.747902002,11.041234019,-504566.360707,-161372.100422,374742.032589,4.194003701,1.220934607,-3.225645218,none,no_burn,,,,,,,,,14224.476,13273.754,115021.8,11336.208,14152.406,13350.568,19455.803146,115021.8,11147.203,5.337027,14064.562,13551.792,107910.4,11336.208,5.396052,7239.260,18058.831,7013.875,18228.234,,"SOI entry; incoming leg CentralBody=Sun; for the flyby use rel_* with CentralBody=Venus, PointMasses={}; BdotT/BdotR target in VenusMJ2000Eq"
+0,flyby_periapsis,venus,Sun,SunMJ2000Eq,venus,VenusMJ2000Eq,Venus,,Mercury;Venus;Earth;Mars;Jupiter;Saturn,46256.386904353,46256.386904353,10 Jul 1985 09:17:08.536,46256.386103612,10 Jul 1985 09:15:59.352,106698048.521328,-16016144.034693,-13967901.185771,13.137016033,37.739302180,13.896216146,2585.729610,-6656.636362,-8804.135571,7.079833063,5.620975047,-2.170599572,none,no_burn,,,,,,,,,,,,11336.208,,,,,,,,,,,,,,,,,"patched two-body periapsis; use rel_* in VenusMJ2000Eq with CentralBody=Venus, PointMasses={}; x_km is heliocentric for continuity"
+1,flyby_exit,venus,Sun,SunMJ2000Eq,venus,VenusMJ2000Eq,Sun,Mercury;Venus;Mars;Jupiter;Saturn,Earth,46257.635016921,46257.635016921,11 Jul 1985 15:14:25.461,46257.634216180,11 Jul 1985 15:13:16.277,107644501.912546,-12182396.325872,-12187222.948687,8.088171195,35.416339035,16.443042457,348615.869297,498499.408256,97063.461934,3.105726030,4.438902657,0.931357785,tcm,post_burn; state includes dv; do_not_reapply,46257.635016921,11 Jul 1985 15:14:25.461,46257.634216180,11 Jul 1985 15:13:16.277,0.094673047,-0.009249554,-0.081602226,0.125329419,,,,11336.208,,,,,,,,,,,,,,,,,next-leg TCM at SOI exit; post-burn state; pre = state - dv
+1,flyby_entry,earth,Sun,SunMJ2000Eq,earth,EarthMJ2000Eq,Sun,Mercury;Venus;Mars;Jupiter;Saturn,Earth,46565.734161474,46565.734161474,15 May 1986 17:37:11.551,46565.733360734,15 May 1986 17:36:02.367,-87657657.077897,-114160223.991738,-49313280.892646,28.467612603,-7.462627267,-5.246384783,-448921.494206,-788506.255002,-155750.739927,4.606684367,8.391762422,1.627588298,none,no_burn,,,,,,,,,-13588.740,4220.569,93557.1,10621.971,-14150.822,1490.402,14229.091832,93557.1,10588.491,9.665729,-14160.054,1443.391,93571.2,10621.971,9.712583,-14150.822,1490.402,-14160.054,1443.391,,"SOI entry; incoming leg CentralBody=Sun; for the flyby use rel_* with CentralBody=Earth, PointMasses={}; BdotT/BdotR target in EarthMJ2000Eq"
+1,flyby_periapsis,earth,Sun,SunMJ2000Eq,earth,EarthMJ2000Eq,Earth,,Mercury;Venus;Earth;Mars;Jupiter;Saturn,46566.816997751,46566.816997751,16 May 1986 19:36:28.605,46566.816197010,16 May 1986 19:35:19.421,-84969297.945382,-114828149.296433,-49792841.304210,33.308636400,-6.515739138,-4.219938529,-7336.929884,7661.911206,-539.301940,9.140991510,8.927517810,2.475487052,none,no_burn,,,,,,,,,,,,10621.971,,,,,,,,,,,,,,,,,"patched two-body periapsis; use rel_* in EarthMJ2000Eq with CentralBody=Earth, PointMasses={}; x_km is heliocentric for continuity"
+2,flyby_exit,earth,Sun,SunMJ2000Eq,earth,EarthMJ2000Eq,Sun,Mercury;Venus;Mars;Jupiter;Saturn,Earth,46567.899856732,46567.899856732,17 May 1986 21:35:47.621,46567.899055991,17 May 1986 21:34:38.437,-81888872.962079,-115830337.310514,-50228206.238492,32.908340322,-10.618009668,-4.604245970,797982.072926,430922.669762,182085.869782,8.442782126,4.409664938,1.910723251,tcm,post_burn; state includes dv; do_not_reapply,46567.899856732,17 May 1986 21:35:47.621,46567.899055991,17 May 1986 21:34:38.437,-0.044379336,-0.003682627,-0.009319202,0.045496535,,,,10621.971,,,,,,,,,,,,,,,,,next-leg TCM at SOI exit; post-burn state; pre = state - dv
+2,flyby_entry,earth,Sun,SunMJ2000Eq,earth,EarthMJ2000Eq,Sun,Mercury;Venus;Mars;Jupiter;Saturn,Earth,47394.976715747,47394.976715747,21 Aug 1988 23:26:28.240,47394.975915006,21 Aug 1988 23:25:19.056,129118783.802960,-70908604.888376,-30747683.892831,24.445100282,22.833213312,9.901169396,-925653.364723,45061.209885,15664.876742,9.716284553,-0.556926228,-0.240324125,none,no_burn,,,,,,,,,10239.151,3468.893,93858.6,7367.975,8019.546,7249.849,10810.801688,93858.6,7369.801,9.690925,8006.461,7241.996,93461.8,7367.975,9.712775,8019.546,7249.849,8006.461,7241.996,,"SOI entry; incoming leg CentralBody=Sun; for the flyby use rel_* with CentralBody=Earth, PointMasses={}; BdotT/BdotR target in EarthMJ2000Eq"
+2,flyby_periapsis,earth,Sun,SunMJ2000Eq,earth,EarthMJ2000Eq,Earth,,Mercury;Venus;Earth;Mars;Jupiter;Saturn,47396.063041772,47396.063041772,23 Aug 1988 01:30:46.809,47396.062241031,23 Aug 1988 01:29:37.625,131407089.634187,-68751803.471458,-29811078.718530,27.786380246,26.727307962,13.408333916,2282.678866,-5226.829139,-4664.406228,13.528279634,3.088664347,3.159415472,none,no_burn,,,,,,,,,,,,7367.975,,,,,,,,,,,,,,,,,"patched two-body periapsis; use rel_* in EarthMJ2000Eq with CentralBody=Earth, PointMasses={}; x_km is heliocentric for continuity"
+3,flyby_exit,earth,Sun,SunMJ2000Eq,earth,EarthMJ2000Eq,Sun,Mercury;Venus;Earth;Mars;Saturn,Jupiter,47397.144689489,47397.144689489,24 Aug 1988 03:28:21.171,47397.143888748,24 Aug 1988 03:27:11.987,133436381.449361,-66106380.119479,-28444600.493201,21.447742549,28.317988986,14.537001648,721160.369002,419807.228720,399142.346657,7.662596693,4.439780368,4.184520507,final_tcm,post_burn; state includes dv; do_not_reapply,47397.144689489,24 Aug 1988 03:28:21.171,47397.143888748,24 Aug 1988 03:27:11.987,0.127154229,-0.054634179,-0.083639036,0.161705225,,,,7367.975,,,,,,,,,,,,,,,,,final-leg TCM at SOI exit; post-burn state
+3,arrival,jupiter,Sun,SunMJ2000Eq,jupiter,JupiterMJ2000Eq,Sun,Mercury;Venus;Earth;Mars;Saturn,Jupiter,48377.269061078,48377.269061078,01 May 1991 06:27:26.877,48377.268260338,01 May 1991 06:26:17.693,-573174930.272876,502488763.788364,229355564.113518,-5.363272630,-4.356477031,-2.296841601,0.248413,-0.404951,-0.161182,3.746107889,3.993021388,-0.813710868,none,no_burn,,,,,,,,,,,,,,,,,,,,,,,,,,,,0.501671,final leg end; miss = |r - r_target|; no B-plane at target center

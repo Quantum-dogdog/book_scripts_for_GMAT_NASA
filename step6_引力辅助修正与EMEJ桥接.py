@@ -649,6 +649,7 @@ def make_figs(vd_final):
 # ===========================================================================
 import os as _b_os
 import json as _b_json
+import csv as _b_csv
 import datetime as _b_dt
 from scipy.optimize import least_squares as _b_ls, brentq as _b_brentq
 
@@ -672,17 +673,30 @@ _B_RX = np.array([[1.0, 0.0, 0.0],
 
 _B_DE421_PATH = _b_os.environ.get("DE421_PATH", "")
 _B_KERNEL = None
+_B_LEGACY = False
 
 def _b_init_de421():
-    global _B_KERNEL
+    """优先 .bsp (jplephem.spk)；否则用 PyPI de421 包 + jplephem 旧版 Ephemeris。"""
+    global _B_KERNEL, _B_LEGACY
     cands = ([_B_DE421_PATH] if _B_DE421_PATH else []) + \
-            ["/tmp/de421.bsp", "/data/de421.bsp", "de421.bsp"]
+            ["/tmp/de421.bsp", "/data/de421.bsp",
+             _b_os.path.join(_b_os.path.dirname(
+                 _b_os.path.abspath(__file__)), "de421.bsp"),
+             "de421.bsp"]
     path = next((p for p in cands if p and _b_os.path.isfile(p)), None)
-    if path is None:
-        return False
+    if path is not None:
+        try:
+            from jplephem.spk import SPK
+            _B_KERNEL = SPK.open(path)
+            _B_LEGACY = False
+            return True
+        except Exception:
+            pass
     try:
-        from jplephem.spk import SPK
-        _B_KERNEL = SPK.open(path)
+        import de421
+        from jplephem.ephem import Ephemeris
+        _B_KERNEL = Ephemeris(de421)
+        _B_LEGACY = True
         return True
     except Exception:
         return False
@@ -698,11 +712,28 @@ def _b_avail(name):
     return (_B_HAVE_DE421 and name in _B_PAIRS) or (name in _PLANET_KEP)
 
 def _b_state(name, t_mjd):
-    """日心黄道状态 (km, km/s)，优先 DE421。"""
+    """日心黄道状态 (km, km/s)，优先 DE421（SPK 或 de421 包），回退 Standish。"""
     if name == "flora":
         return flora_state(t_mjd)
-    if _B_HAVE_DE421 and name in _B_PAIRS:
+    if _B_HAVE_DE421 and (name in _B_PAIRS or _B_LEGACY):
         jd = float(t_mjd) + 2400000.5
+        if _B_LEGACY:
+            def _pv(n):
+                rr, vv = _B_KERNEL.position_and_velocity(n, jd)
+                return (np.asarray(rr, float).reshape(3),
+                        np.asarray(vv, float).reshape(3))
+            if name == "earth":
+                rem, vem = _pv("earthmoon")
+                rm, vm = _pv("moon")
+                share = getattr(_B_KERNEL, "earth_share",
+                                1.0 / (1.0 + _B_KERNEL.EMRAT))
+                r = rem - share * rm
+                v = vem - share * vm
+            else:
+                r, v = _pv(name)
+            ps, vs = _pv("sun")
+            r = r - ps; v = v - vs
+            return _B_RX @ r, (_B_RX @ v) / _B_DAY
         r = np.zeros(3); v = np.zeros(3)
         for c, t in _B_PAIRS[name]:
             p, vv = _B_KERNEL[(c, t)].compute_and_differentiate(jd)
@@ -1171,8 +1202,8 @@ def _b_mjd_utc(m):
 def _b_to_eq(r, v):
     return _B_RX.T @ np.asarray(r, float), _B_RX.T @ np.asarray(v, float)
 
-def export_bridge_csv(res, path="bridge.csv"):
-    """逐事件写出历元/日心状态/该节点 TCM/飞越 B 平面量，供 GMAT 读取。"""
+def _export_bridge_csv_legacy(res, path="bridge.csv"):
+    """旧版导出（保留用于对拍）：状态赤道、dv/BT/BR 黄道，历元标成 UTC。"""
     seq = res["seq"]; legs = res["legs"]; fin = res["final"]
     flies = seq["flies"]
     chain = [seq["body0"]] + [f["body"] for f in flies] + [seq["target"]]
@@ -1264,6 +1295,400 @@ def export_bridge_csv(res, path="bridge.csv"):
 
 
 # ---------------------------------------------------------------------------
+# GMAT-ready 导出（默认）：所有矢量统一到 J2000 地球赤道，时间显式区分 TDB/UTC
+# ---------------------------------------------------------------------------
+_B_TDB_MINUS_UTC = 69.184          # s = TT-UTC；TDB-TT ~1.6 ms，忽略
+_B_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+# J2000 平赤道坐标下的天体自转轴（IAU 2000，RA/Dec, deg）。
+# GMAT 的 <Body>MJ2000Eq 以该天体自转轴为 Z 轴；B 平面 T = S x Z_body。
+_B_POLE_J2000 = {
+    "mercury": (281.0103, 61.4155),
+    "venus":   (272.76, 67.16),
+    "earth":   (0.0, 90.0),
+    "mars":    (317.68143, 52.88650),
+    "jupiter": (268.056595, 64.495303),
+    "saturn":  (40.589, 83.537),
+}
+_B_GMAT_NAME = {"mercury": "Mercury", "venus": "Venus", "earth": "Earth",
+                "mars": "Mars", "jupiter": "Jupiter", "saturn": "Saturn"}
+
+
+def _b_mjd_greg(m):
+    """MJD -> GMAT Gregorian 串（DD Mon YYYY HH:MM:SS.sss），不依赖 locale。"""
+    base = _b_dt.datetime(1858, 11, 17)
+    d = base + _b_dt.timedelta(days=float(m))
+    return "%02d %s %04d %02d:%02d:%02d.%03d" % (
+        d.day, _B_MONTHS[d.month - 1], d.year, d.hour, d.minute, d.second,
+        d.microsecond // 1000)
+
+
+def _b_mjd_utc_from_tdb(m):
+    """内部 MJD 按 TDB 解释；返回同一事件的 UTC MJD。"""
+    return float(m) - _B_TDB_MINUS_UTC / _B_DAY
+
+
+def _b_body_matrix(body):
+    """J2000 赤道 -> 天体 MJ2000Eq 的旋转（行 = 天体轴），只由自转轴决定。"""
+    ra, dec = _B_POLE_J2000.get(body, (0.0, 90.0))
+    ra = math.radians(ra); dec = math.radians(dec)
+    z = np.array([math.cos(dec) * math.cos(ra),
+                  math.cos(dec) * math.sin(ra),
+                  math.sin(dec)])
+    x = np.cross(np.array([0.0, 0.0, 1.0]), z)
+    if np.linalg.norm(x) < 1e-12:
+        x = np.array([1.0, 0.0, 0.0])
+    x = x / np.linalg.norm(x)
+    y = np.cross(z, x)
+    return np.vstack([x, y, z])
+
+
+def _b_bplane_frame(rr_eq, vv_eq, mu, body=None):
+    """赤道相对状态 -> B 平面量；body=None 用太阳系 J2000 赤道极，否则天体极。"""
+    C = np.eye(3) if body in (None, "flora") else _b_body_matrix(body)
+    BT, BR, tau, b, e, vinf, S, nh, ehat = _b_bplane(
+        C @ np.asarray(rr_eq, float), C @ np.asarray(vv_eq, float), mu)
+    rp = (mu / vinf ** 2) * (e - 1.0) if vinf > 1e-12 else 0.0
+    return dict(BT=float(BT), BR=float(BR), tau=float(tau), B=float(b),
+                rp=float(rp), vinf=float(vinf), e=float(e))
+
+
+def _b_fm_sets(seq):
+    """每段 GMAT PointMasses 列表（与 run_bridge 的摄动体排除规则一致）。"""
+    allp = [p for p in _B_PLANETS if _b_avail(p)]
+    sets = []
+    for i, f in enumerate(seq["flies"]):
+        excl = {f["body"]} | ({seq["body0"]} if i == 0 else set())
+        sets.append([p for p in allp if p not in excl])
+    sets.append([p for p in allp if p != seq["target"]])
+    return allp, sets
+
+
+def _b_fm_str(fm):
+    if fm is None:
+        return ""
+    return ";".join(_B_GMAT_NAME.get(p, p.capitalize()) for p in fm)
+
+
+def _b_fm_excl_str(fm):
+    if fm is None:
+        return ""
+    allp = [p for p in _B_PLANETS if _b_avail(p)]
+    return ";".join(_B_GMAT_NAME.get(p, p.capitalize())
+                    for p in allp if p not in fm)
+
+
+def _b_f6(x):
+    return "" if not np.isfinite(x) else "%.6f" % x
+
+
+def _b_f9(x):
+    return "" if not np.isfinite(x) else "%.9f" % x
+
+
+def _b_bp6(bp):
+    if bp is None:
+        return [""] * 6
+    return ["%.3f" % bp["BT"], "%.3f" % bp["BR"], "%.6f" % bp["B"],
+            "%.1f" % bp["tau"], "%.3f" % bp["rp"], "%.6f" % bp["vinf"]]
+
+
+def _b_bp5(bp):
+    if bp is None:
+        return [""] * 5
+    return ["%.3f" % bp["BT"], "%.3f" % bp["BR"], "%.1f" % bp["tau"],
+            "%.3f" % bp["rp"], "%.6f" % bp["vinf"]]
+
+
+def _b_bp2(bp):
+    if bp is None:
+        return ["", ""]
+    return ["%.3f" % bp["BT"], "%.3f" % bp["BR"]]
+
+
+def _b_gmat_row(*, leg, t, event, body, y, rel_body="-",
+                fm_central="Sun", fm=None, burn_type="none",
+                burn_semantics="no_burn", burn_epoch=None, dv=None,
+                bp=None, bp_target=None, bp_sun=None, bp_sun_target=None,
+                legacy=None, miss=None, note=""):
+    """一行 = 一个事件。所有 heliocentric 矢量转到 SunMJ2000Eq。"""
+    y = np.asarray(y, float)
+    r_eq, v_eq = _b_to_eq(y[:3], y[3:6])
+
+    if rel_body != "-":
+        rb, vb = _b_state(rel_body, t)
+        rr_eq, vv_eq = _b_to_eq(y[:3] - rb, y[3:6] - vb)
+        if rel_body in _B_POLE_J2000:
+            C = _b_body_matrix(rel_body)
+            rr_rel, vv_rel = C @ rr_eq, C @ vv_eq
+            rel_frame = "%sMJ2000Eq" % _B_GMAT_NAME.get(
+                rel_body, rel_body.capitalize())
+        else:
+            rr_rel, vv_rel = rr_eq, vv_eq
+            rel_frame = "SunMJ2000Eq"
+    else:
+        rr_rel = vv_rel = np.full(3, np.nan)
+        rel_frame = "-"
+
+    t = float(t)
+    t_utc = _b_mjd_utc_from_tdb(t)
+    time_vals = ["%.9f" % t, "%.9f" % t, _b_mjd_greg(t),
+                 "%.9f" % t_utc, _b_mjd_greg(t_utc)]
+
+    state_vals = [_b_f6(r_eq[0]), _b_f6(r_eq[1]), _b_f6(r_eq[2]),
+                  _b_f9(v_eq[0]), _b_f9(v_eq[1]), _b_f9(v_eq[2]),
+                  _b_f6(rr_rel[0]), _b_f6(rr_rel[1]), _b_f6(rr_rel[2]),
+                  _b_f9(vv_rel[0]), _b_f9(vv_rel[1]), _b_f9(vv_rel[2])]
+
+    has_burn = (burn_type != "none") and (dv is not None)
+    if has_burn:
+        dv_eq = _B_RX.T @ np.asarray(dv, float)
+        b_epoch = t if burn_epoch is None else float(burn_epoch)
+        b_utc = _b_mjd_utc_from_tdb(b_epoch)
+        burn_time = ["%.9f" % b_epoch, _b_mjd_greg(b_epoch),
+                     "%.9f" % b_utc, _b_mjd_greg(b_utc)]
+        burn_dv = ["%.9f" % dv_eq[0], "%.9f" % dv_eq[1],
+                   "%.9f" % dv_eq[2], "%.9f" % np.linalg.norm(dv_eq)]
+    else:
+        burn_type = "none"
+        burn_semantics = "no_burn"
+        burn_time = [""] * 4
+        burn_dv = [""] * 4
+
+    if legacy is None:
+        legacy_vals = ["", "", "", ""]
+    else:
+        legacy_vals = [
+            "" if legacy.get("BT") is None else "%.3f" % legacy["BT"],
+            "" if legacy.get("BR") is None else "%.3f" % legacy["BR"],
+            "" if legacy.get("tau") is None else "%.1f" % legacy["tau"],
+            "" if legacy.get("rp") is None else "%.3f" % legacy["rp"],
+        ]
+
+    return ([str(leg), event, body, "Sun", "SunMJ2000Eq",
+             rel_body, rel_frame, fm_central, _b_fm_str(fm),
+             _b_fm_excl_str(fm)]
+            + time_vals + state_vals
+            + [burn_type, burn_semantics] + burn_time + burn_dv
+            + legacy_vals
+            + _b_bp6(bp) + _b_bp5(bp_target)
+            + _b_bp2(bp_sun) + _b_bp2(bp_sun_target)
+            + ["" if miss is None else "%.6f" % miss, note])
+
+
+def export_bridge_csv(res, path="bridge.csv"):
+    """逐事件写 GMAT 可直接使用的历元/日心状态/Δv/B 平面/力模型/燃耗语义。
+
+    与旧版的三处关键差别：
+      (1) dv 也转到 SunMJ2000Eq（旧版只转状态，dv 留在黄道）；
+      (2) 历元显式给 TDB 与 UTC（旧版把 TDB 的 MJD 直接标成 UTC，差 69.184 s）；
+      (3) B 平面同时给目标天体 MJ2000Eq（GMAT BdotT/BdotR 的物理基准）与
+          SunMJ2000Eq（日心赤道极）两套，并区分设计目标/实际达到值。
+    """
+    seq = res["seq"]; legs = res["legs"]; fin = res["final"]
+    flies = seq["flies"]; body0 = seq["body0"]; target = seq["target"]
+    allp, fmsets = _b_fm_sets(seq)
+
+    if _B_HAVE_DE421:
+        eph_label = ("JPL DE421 (.bsp via jplephem.spk)" if not _B_LEGACY
+                     else "JPL DE421 (PyPI de421 + jplephem legacy)")
+    else:
+        eph_label = "Standish Keplerian elements (DE421 unavailable)"
+
+    hdr = [
+        "# step6 GMAT bridge: patched-conic MGA -> precise ephemeris -> GMAT input table",
+        "# body sequence: " + " -> ".join(
+            ["%s(departure)" % body0] +
+            ["%s(rp=%.1f km)" % (f["body"], f["rp"]) for f in flies] +
+            [target]),
+        "# ephemeris: " + eph_label,
+        "# time: internal MJD is TDB. epoch_mjd is a legacy alias of epoch_mjd_tdb.",
+        "#       UTC = TDB - %.3f s (TT-UTC; TDB-TT ~1.6 ms neglected)." % _B_TDB_MINUS_UTC,
+        "#       GMAT: Sat.DateFormat = TDBGregorian; Sat.Epoch = epoch_tdb;",
+        "#       or Sat.DateFormat = UTCGregorian; Sat.Epoch = epoch_utc.",
+        "# frame: heliocentric x/y/z,vx/vy/vz and dv are SunMJ2000Eq",
+        "#        (Origin=Sun, Axes=MJ2000Eq; state_frame is the frame label, create it",
+        "#        in GMAT under any free name, e.g. HelioMJ2000Eq). rel_* are body-centered",
+        "#        in <Body>MJ2000Eq.",
+        "#        Do NOT use Axes=BodyInertial for the Sun: the Sun IAU pole differs",
+        "#        from Earth's J2000 pole by ~26 deg; SunXyz would rotate every vector.",
+        "# B-plane: BT_body_km/BR_body_km are GMAT BdotT/BdotR in <Body>MJ2000Eq",
+        "#          (i.e. CoordinateSystem.Origin=<Body>, Axes=BodyInertial).",
+        "#          (T = S x Z_body, R = S x T; S = incoming asymptote).",
+        "#          BT_sunEq_km/BR_sunEq_km use the same target-centered B vector",
+        "#          projected on SunMJ2000Eq axes (T = S x Z_earth); axes cross-check only.",
+        "#          sign check: GMAT versions differ in the BdotT/BdotR sign convention;",
+        "#          compare one flyby; if both signs flip, negate BT/BR consistently.",
+        "#          BT_target_* = design target; BT_* = achieved by the bridge TCM.",
+        "#          BT_km/BR_km/tau_s/rp_km are the legacy internal-ecliptic values (audit only).",
+        "# force model: point masses only; no Moon, drag, SRP, harmonics, relativity.",
+        "#          fm_point_masses = GMAT PointMasses; fm_central_body = GMAT CentralBody.",
+        "#          flyby_periapsis: CentralBody=<Body>, PointMasses={} (two-body hyperbola).",
+        "# burns: burn_semantics says whether the row state is pre- or post-burn.",
+        "#        pre_burn: apply dv at burn_epoch (= row epoch).",
+        "#        post_burn: row state already includes dv; pre = state - dv.",
+        "#        post_burn_at_earlier_epoch: dv was applied at burn_epoch, not at this row epoch.",
+        "# departure: row state is post-TCM; burn_epoch is t0 (earlier than the row epoch).",
+        "# flyby_entry: use BT_target_body_km/BR_target_body_km as GMAT Achieve targets;",
+        "#             BT_body_km/BR_body_km are the values achieved by the bridge TCM.",
+        "# GMAT setup:",
+        "#   Create CoordinateSystem HelioMJ2000Eq; HelioMJ2000Eq.Origin = Sun;",
+        "#   HelioMJ2000Eq.Axes = MJ2000Eq;   % use any free name; NOT BodyInertial",
+        "#   Create ForceModel FM; FM.CentralBody = Sun; FM.PrimaryBodies = {Sun};",
+        "#   FM.PointMasses = {Mercury, Venus, Earth, Jupiter, Saturn};",
+        "#   FM.Drag = None; FM.SRP = Off; FM.RelativisticCorrection = Off;",
+        "#   Create ImpulsiveBurn TCM; TCM.CoordinateSystem = HelioMJ2000Eq;",
+        "#   TCM.Element1 = dvx_km_s; TCM.Element2 = dvy_km_s; TCM.Element3 = dvz_km_s;",
+        "# B-plane target in GMAT:",
+        "#   Create CoordinateSystem MarsFlyby; MarsFlyby.Origin = Mars;",
+        "#   MarsFlyby.Axes = BodyInertial;",
+        "#   Achieve DC1(Sat.MarsFlyby.BdotT = BT_target_body_km, {Tolerance = 0.1});",
+        "#   Achieve DC1(Sat.MarsFlyby.BdotR = BR_target_body_km, {Tolerance = 0.1});",
+        "# departure epoch correction: %+.4f d vs low-fidelity sequence" % res["epoch_shift"],
+        "#",
+    ]
+
+    cols = [
+        "leg", "event", "body", "state_origin", "state_frame",
+        "rel_body", "rel_frame", "fm_central_body", "fm_point_masses",
+        "fm_exclude",
+        "epoch_mjd", "epoch_mjd_tdb", "epoch_tdb", "epoch_mjd_utc", "epoch_utc",
+        "x_km", "y_km", "z_km", "vx_km_s", "vy_km_s", "vz_km_s",
+        "rel_x_km", "rel_y_km", "rel_z_km",
+        "rel_vx_km_s", "rel_vy_km_s", "rel_vz_km_s",
+        "burn_type", "burn_semantics",
+        "burn_epoch_mjd_tdb", "burn_epoch_tdb",
+        "burn_epoch_mjd_utc", "burn_epoch_utc",
+        "dvx_km_s", "dvy_km_s", "dvz_km_s", "dv_km_s",
+        "BT_km", "BR_km", "tau_s", "rp_km",
+        "BT_body_km", "BR_body_km", "B_body_km", "tau_body_s",
+        "rp_actual_km", "vinf_actual_km_s",
+        "BT_target_body_km", "BR_target_body_km", "tau_target_s",
+        "rp_target_km", "vinf_target_km_s",
+        "BT_sunEq_km", "BR_sunEq_km",
+        "BT_target_sunEq_km", "BR_target_sunEq_km",
+        "miss_km", "note",
+    ]
+
+    rows = []
+
+    # --- 出发行：post-TCM 的日心状态；TCM 本身在 burn_epoch（通常早于该行） ---
+    L0 = legs[0] if legs else None
+    if L0 is not None:
+        dv0 = L0["dv"]
+        t_dep = L0.get("t_dep_soi") or res["t0c"]
+        y_dep = L0.get("y_dep_soi")
+        if y_dep is None:
+            y_dep = L0["y_start_post"]
+            dep_note = ("post-TCM heliocentric state at departure epoch; "
+                        "TCM applied at burn_epoch; do not re-apply")
+        else:
+            dep_note = ("post-TCM heliocentric state on the departure-leg conic; "
+                        "Earth/Mars excluded; TCM applied at burn_epoch (earlier); "
+                        "do not re-apply; rel state is Earth-centered (may be inside SOI)")
+        dep_burn_type = "departure_tcm"
+        dep_sem = "post_burn_at_earlier_epoch; do_not_reapply"
+    else:
+        dv0 = fin["dv"]
+        t_dep = res["t0c"]
+        y_dep = fin["y_start_post"]
+        dep_note = ("post-TCM heliocentric state at departure epoch; "
+                    "final-leg TCM applied at this epoch; do not re-apply; "
+                    "rel state is at the body center")
+        dep_burn_type = "final_tcm"
+        dep_sem = "post_burn; do_not_reapply"
+
+    rows.append(_b_gmat_row(
+        leg=0, t=t_dep, event="departure", body=body0, y=y_dep,
+        rel_body=body0, fm_central="Sun", fm=fmsets[0],
+        burn_type=dep_burn_type, burn_semantics=dep_sem,
+        burn_epoch=res["t0c"], dv=dv0, note=dep_note))
+
+    # --- 逐段：DSM -> 飞越入口 -> 近点 -> 出口（出口即下一段起点） ---
+    for i, L in enumerate(legs):
+        d = L.get("dsm")
+        if d and L.get("y_dsm") is not None:
+            td = float(d["epoch_mjd"])
+            rows.append(_b_gmat_row(
+                leg=i, t=td, event="dsm", body="-", y=L["y_dsm"],
+                fm_central="Sun", fm=fmsets[i],
+                burn_type="dsm", burn_semantics="pre_burn; apply dv at this epoch",
+                burn_epoch=td, dv=d["dv_km_s"],
+                note="deep-space manoeuvre; state is pre-burn"))
+
+        b = L["body"]; mu = GM[b]; t_in = L["t_in"]
+        rb, vb = _b_state(b, t_in)
+        rr_a, vv_a = _b_to_eq(L["y_ent"][:3] - rb, L["y_ent"][3:6] - vb)
+        bp_a = _b_bplane_frame(rr_a, vv_a, mu, b)
+        bp_a_sun = _b_bplane_frame(rr_a, vv_a, mu, None)
+
+        f = flies[i]
+        rr_t, vv_t = _b_to_eq(f["y_in"][:3] - rb, f["y_in"][3:6] - vb)
+        bp_t = _b_bplane_frame(rr_t, vv_t, mu, b)
+        bp_t_sun = _b_bplane_frame(rr_t, vv_t, mu, None)
+
+        bname = _B_GMAT_NAME.get(b, b.capitalize())
+        rows.append(_b_gmat_row(
+            leg=i, t=t_in, event="flyby_entry", body=b, y=L["y_ent"],
+            rel_body=b, fm_central="Sun", fm=fmsets[i],
+            bp=bp_a, bp_target=bp_t, bp_sun=bp_a_sun,
+            bp_sun_target=bp_t_sun,
+            legacy=dict(BT=L["BT"], BR=L["BR"], tau=L["tau"], rp=L["rp"]),
+            note=("SOI entry; incoming leg CentralBody=Sun; for the flyby use rel_* "
+                  "with CentralBody=%s, PointMasses={}; BdotT/BdotR target in "
+                  "%sMJ2000Eq" % (bname, bname))))
+
+        rows.append(_b_gmat_row(
+            leg=i, t=L["t_peri"], event="flyby_periapsis", body=b,
+            y=L["y_peri"], rel_body=b, fm_central=bname, fm=[],
+            legacy=dict(BT=None, BR=None, tau=None, rp=L["rp"]),
+            note=("patched two-body periapsis; use rel_* in %sMJ2000Eq with "
+                  "CentralBody=%s, PointMasses={}; x_km is heliocentric for continuity"
+                  % (bname, bname))))
+
+        dv_next = legs[i + 1]["dv"] if i + 1 < len(legs) else fin["dv"]
+        y_exit_post = np.asarray(L["y_exit"], float).copy()
+        y_exit_post[3:6] += dv_next
+        last = (i == len(legs) - 1)
+        rows.append(_b_gmat_row(
+            leg=i + 1, t=L["t_exit"], event="flyby_exit", body=b,
+            y=y_exit_post, rel_body=b, fm_central="Sun",
+            fm=fmsets[i + 1] if i + 1 < len(fmsets) else fmsets[-1],
+            burn_type="final_tcm" if last else "tcm",
+            burn_semantics="post_burn; state includes dv; do_not_reapply",
+            burn_epoch=L["t_exit"], dv=dv_next,
+            legacy=dict(BT=None, BR=None, tau=None, rp=L["rp"]),
+            note=("final-leg TCM at SOI exit; post-burn state" if last
+                  else "next-leg TCM at SOI exit; post-burn state; pre = state - dv")))
+
+    # --- 末段 DSM（若有） ---
+    d = fin.get("dsm")
+    if d and fin.get("y_dsm") is not None:
+        td = float(d["epoch_mjd"])
+        rows.append(_b_gmat_row(
+            leg=len(legs), t=td, event="dsm", body="-", y=fin["y_dsm"],
+            fm_central="Sun", fm=fmsets[-1],
+            burn_type="dsm", burn_semantics="pre_burn; apply dv at this epoch",
+            burn_epoch=td, dv=d["dv_km_s"],
+            note="deep-space manoeuvre on final leg; state is pre-burn"))
+
+    # --- 到达行：目标中心处的交会残差；B 平面在中心处病态，故不填 ---
+    rows.append(_b_gmat_row(
+        leg=len(legs), t=fin["t_end"], event="arrival", body=target,
+        y=fin["y_arr"], rel_body=target, fm_central="Sun", fm=fmsets[-1],
+        miss=fin["miss"],
+        note="final leg end; miss = |r - r_target|; no B-plane at target center"))
+
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write("\n".join(hdr) + "\n")
+        w = _b_csv.writer(fh)
+        w.writerow(cols)
+        w.writerows(rows)
+    return path
+
+
+# ---------------------------------------------------------------------------
 # 命令行
 # ---------------------------------------------------------------------------
 def main(argv=None) -> int:
@@ -1280,6 +1705,8 @@ def main(argv=None) -> int:
                     help="把当前序列写成 JSON 模板后退出前保存")
     ap.add_argument("--csv", default="bridge.csv",
                     help="桥接数据输出 CSV 路径（默认 bridge.csv）")
+    ap.add_argument("--legacy-csv", action="store_true",
+                    help="用旧版混合坐标系导出（仅对拍；不建议直接给 GMAT）")
     ap.add_argument("--plot", action="store_true", help="出图3.34~3.37")
     ap.add_argument("--no-moon", action="store_true", help="关闭月球摄动")
     a = ap.parse_args(argv)
@@ -1317,10 +1744,12 @@ def main(argv=None) -> int:
 
     seq = seq_from_nodes(nodes, verbose=True)
     res = run_bridge(seq, verbose=True)
-    path = export_bridge_csv(res, a.csv)
+    path = (_export_bridge_csv_legacy(res, a.csv) if a.legacy_csv
+            else export_bridge_csv(res, a.csv))
     n_dsm = sum(1 for L in res["legs"] if L.get("dsm")) + (1 if res["final"].get("dsm") else 0)
-    print("CSV: %s  (frame=SunMJ2000Eq, %d events)"
-          % (path, 2 + 3 * len(seq["flies"]) + n_dsm))
+    print("CSV: %s  (%s, %d events)"
+          % (path, "legacy mixed-frame" if a.legacy_csv
+             else "GMAT-ready: SunMJ2000Eq + TDB/UTC", 2 + 3 * len(seq["flies"]) + n_dsm))
     return 0
 
 if __name__ == "__main__":

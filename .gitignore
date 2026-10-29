@@ -1,0 +1,12 @@
+# 大文件 / 可下载资源：不入库（见 README「DE421 星历获取」）
+de421.bsp
+*.bsp
+
+# Python 临时产物
+__pycache__/
+*.pyc
+*.pyo
+
+# 本地临时输出
+/tmp/
+*.log.tmp

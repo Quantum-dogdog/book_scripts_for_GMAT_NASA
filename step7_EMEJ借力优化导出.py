@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""emej_export.py -- pykep MGA-1DSM(地->火->地->木) 优化 + 导出 6.py 的 nodes.json
+"""emej_export.py -- pykep MGA-1DSM 优化 + 导出 6.py 的 nodes.json
 
-直接跑本文件即可（等价于你原来的 emej_sade.py），最后多出一个 emej_nodes.json：
+支持两个算例（--case）：
+    emej  : 地->火->地->木（默认，2024 窗口）
+    eveej : Galileo 地->金->地->地->木（1989 窗口，4 段 3 借力）
+
+直接跑本文件即可（等价于你原来的 emej_sade.py），最后多出 nodes.json：
 
     python 6.py --nodes emej_nodes.json --csv emej.csv
 
 注意 pykep 内部是 SI（m, m/s, m^3/s^2），写出去的 JSON 一律换成 km / km/s / MJD。
 
 常用参数：
+    --case eveej        换 Galileo VEEGA 算例
     --x "1.2,0.3,..."   直接用已知冠军染色体，跳过优化
+    --xfile x.json      从 JSON 读冠军染色体（step7 自己会写 <out>_x.json）
     --seed 42           固定 DE 随机种子（默认不固定，每次结果不同）
     --out a.json        输出文件名
     --no-plot           不弹图
@@ -146,21 +152,47 @@ def export_nodes(seq, x, path="emej_nodes.json", tof_encoding="direct"):
     return nodes, path
 
 
-def _build_udp():
-    seq = [jpl_lp('earth'), jpl_lp('mars'), jpl_lp('earth'), jpl_lp('jupiter')]
-    udp = mga_1dsm(
-        seq=seq,
-        t0=[epoch(9053), epoch(9054)],
-        tof=[
-            [0.3 * 365.25, 0.4 * 365.25],
-            [1.8 * 365.25, 1.9 * 365.25],
-            [3.3 * 365.25, 3.4 * 365.25],
-        ],
-        vinf=[0.1, 5],
-        add_vinf_dep=True,
-        add_vinf_arr=True,
-        multi_objective=False,
-    )
+def _build_udp(case="emej"):
+    """按算例名构建 MGA-1DSM。
+
+    emej  : 地->火->地->木（2024 窗口）
+    eveej : Galileo 伽利略号 地->金->地->地->木（1989 窗口，4 段 3 借力）
+            参数取自 pykep_example 的 jialilve_eveej 算例。
+    """
+    if case == "emej":
+        seq = [jpl_lp('earth'), jpl_lp('mars'), jpl_lp('earth'), jpl_lp('jupiter')]
+        udp = mga_1dsm(
+            seq=seq,
+            t0=[epoch(9053), epoch(9054)],
+            tof=[
+                [0.3 * 365.25, 0.4 * 365.25],
+                [1.8 * 365.25, 1.9 * 365.25],
+                [3.3 * 365.25, 3.4 * 365.25],
+            ],
+            vinf=[0.1, 5],
+            add_vinf_dep=True,
+            add_vinf_arr=True,
+            multi_objective=False,
+        )
+    elif case == "eveej":
+        seq = [jpl_lp('earth'), jpl_lp('venus'),
+               jpl_lp('earth'), jpl_lp('earth'), jpl_lp('jupiter')]
+        udp = mga_1dsm(
+            seq=seq,
+            t0=[epoch(-3731.5), epoch(-3717.5)],      # 1989-10-11 ~ 10-25
+            tof=[
+                [0.25 * 365.25, 0.50 * 365.25],       # E->V
+                [0.65 * 365.25, 0.95 * 365.25],       # V->E
+                [1.80 * 365.25, 2.20 * 365.25],       # E->E 2:1 共振
+                [2.50 * 365.25, 3.50 * 365.25],       # E->J
+            ],
+            vinf=[2.5, 5.0],
+            add_vinf_dep=True,
+            add_vinf_arr=True,
+            multi_objective=False,
+        )
+    else:
+        raise ValueError("未知算例 %r（可选 emej / eveej）" % case)
     return seq, udp
 
 
@@ -183,6 +215,8 @@ def _check_against_udp(udp, x, nodes):
 def run(argv=None):
     ap = argparse.ArgumentParser(description="pykep MGA-1DSM -> nodes.json")
     ap.add_argument("--out", default="emej_nodes.json")
+    ap.add_argument("--case", default="emej", choices=["emej", "eveej"],
+                    help="emej=地火地木；eveej=Galileo 地金地地木")
     ap.add_argument("--x", default=None, help="冠军染色体，逗号分隔（跳过优化）")
     ap.add_argument("--xfile", default=None, help="从 json/txt 读染色体")
     ap.add_argument("--seed", type=int, default=None)
@@ -192,7 +226,7 @@ def run(argv=None):
     ap.add_argument("--no-plot", action="store_true")
     a = ap.parse_args(argv)
 
-    seq, udp = _build_udp()
+    seq, udp = _build_udp(a.case)
 
     if a.x:
         x = [float(q) for q in a.x.replace(" ", "").split(",") if q]
