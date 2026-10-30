@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""6.py — §3.4 精确动力学模型中的引力辅助（教材 p155~164，表3.24~3.28，图3.34~3.37）
+"""step6 · §3.4 引力辅助：书链复现 + 二体→精确模型桥接
 
-任务：地球出发 → 火星引力辅助 → 交会小行星 8 号 Flora。
-方法链（书结构）：
-  §3.4.1 简单(等效脉冲)模型初步设计：Lambert 日心转移 + 地心逃逸双曲线拼接，
-         给出 t0/tM/tf、地心逃逸近地点速度 vp0、火星进/离双曲线剩余速度。
-  §3.4.2 精确模型轨道修正：B 平面参数(3.97~3.107) + 时间参数 τ(3.108)
-         + 微分修正(3.109~3.111)，设计变量取地心逃逸近地点速度 vp0。
-  §3.4.3 算例：两次微分修正 → 表3.27(火星借力) / 表3.28(Flora 交会)。
+两套模式各管各的打印：
 
-复现所需但书页未给、本文件按标准替代的「缺失条件」（见 README 说明）：
-  (1) 星历源：书用 JPL DE/STK；此处用 JPL 近似开普勒根数解析算地球/火星，
-      Flora 用表3.24根数二体递推 → 数值与书有百分之几偏差，方法与图可复现。
-  (2) 太阳光压力参数未给 → SRP 置零（USE_SRP 开关）。
-  (3) 精确模型摄动行星：取 日 + 地 + 火（USE_MOON 可加月球）。
-  (4) PSO 初值搜索不重跑，直接用书中表3.25/3.26 结果作微分修正初值。
+  --book   书链复现：地球出发 → 火星引力辅助 → 交会小行星 8 号 Flora。
+           §3.4.1 等效脉冲初步设计（Lambert 日心转移 + 地心逃逸双曲线），
+           §3.4.2 精确模型修正（B 平面参数 + 时间参数 τ + 微分修正，设计变量取
+           地心逃逸近地点速度 vp0），§3.4.3 两次修正后的火星借力与 Flora 交会状态。
+           书里没给的几条按标准替代：星历用 JPL 近似开普勒根数解析算地/火，Flora
+           用根数二体递推（数值与书差百分之几、方法与图可复现）；太阳光压置零；
+           摄动体日+地+火，月球由 USE_MOON 控制（`--no-moon` 关）；微分修正初值
+           直接取书的结果，不重跑 PSO 搜初值。
 
-单位：km, km/s, 日(MJD)。力模型为日心惯性系(J2000 黄道)多体。
-CLI:
-  python 6.py                 # 表3.27/3.28 微分修正 + 标称校验
-  python 6.py --plot          # 出图3.34~3.37 PNG
-  python 6.py --no-moon       # 关闭月球摄动
+  --bridge 桥接器（默认）：吃 step7/step8 导出的 nodes.json（低精度二体序列），
+           在精确星历上逐段重算飞越，输出 GMAT 就绪的 CSV——逐事件给 TDB/UTC
+           双历元、日心状态、B 平面 BT/BR/τ 和每段的中心体/点质量设置。
+           序列 JSON 的格式用 --dump-nodes 打一份模板照着填。
+
+单位：km、km/s、日(MJD)；力模型为日心惯性系（J2000 黄道）多体。
+
+用法：
+  python step6_引力辅助修正与EMEJ桥接.py --book                # 书链复现
+  python step6_引力辅助修正与EMEJ桥接.py --book --plot         # 顺带出轨迹 PNG
+  python step6_引力辅助修正与EMEJ桥接.py --nodes data/emej_nodes_repro.json \
+         --csv emej_gmat_run.csv                               # 桥接 → GMAT 表
+  python step6_引力辅助修正与EMEJ桥接.py --dump-nodes my.json  # 打序列模板
+  # --legacy-csv 只用于和旧版 CSV 对趋势（黄道/赤道混合坐标系），不建议喂 GMAT
 """
 from __future__ import annotations
 import argparse
@@ -245,9 +250,10 @@ def bplane_from_state(r_rel, v_rel, mu=GM["mars"]):
     nu = math.acos(max(-1, min(1, cosnu)))
     if np.dot(r_rel, v_rel) < 0:
         nu = 2*math.pi - nu
-    sinhH = (e + math.cos(nu)) / (1 + e * math.cos(nu))
-    H = math.asinh(sinhH)
-    # (3.108): τ = sqrt(-a^3/mu)(sinhH - H), 近火点前为正
+    # 双曲线偏近点角：coshH = (e + cosν)/(1 + e·cosν)（ν→ν∞ 时 H→∞）
+    H = math.acosh(max(1.0, (e + math.cos(nu)) / (1 + e * math.cos(nu))))
+    # (3.108)：τ = sqrt(-a³/μ)(sinhH − H)（书的记法；桥接段 SOI 计时另用
+    # 含 e 的标准双曲开普勒式，见 _b_hyper_exit_days），近火点前为正
     tau = math.sqrt(-a**3 / mu) * (math.sinh(H) - H)
     if np.dot(r_rel, v_rel) < 0:
         tau = -tau
@@ -397,23 +403,40 @@ SIMPLE = dict(
     BT_tar=4027.500, BR_tar=3094.187,        # 表3.27 目标 B 平面
     flora_pos_book=[-320179592.282, 137168656.845, 25782659.425],  # 表3.28
 )
-# 自洽种子：解出 vd0 / tM / 2-body 瞄准 B 平面
-_seed = simple_model_seed()
-T_MARS = _seed["tM"]          # 下游(精确模型/图)统一使用解出的借力历元
-SIMPLE["vd0"] = _seed["vd0"]
-SIMPLE["tM"] = _seed["tM"]
-SIMPLE["vinf_in"] = _seed["vinf_in"]
-SIMPLE["vinf_out"] = _seed["vinf_out"]
-SIMPLE["BT_2b"] = _seed["BT"]
-SIMPLE["BR_2b"] = _seed["BR"]
-SIMPLE["b_2b"] = _seed["b"]
-SIMPLE["vi_2b"] = _seed["vi"]
-SIMPLE["phi"] = _seed["phi"]
-SIMPLE["delta"] = _seed["delta"]
-SIMPLE["rp_enc"] = _seed["rp_enc"]
-SIMPLE["b_use"] = _seed["b_use"]
 SIMPLE["BT_tar_use"] = SIMPLE["BT_tar"]
 SIMPLE["BR_tar_use"] = SIMPLE["BR_tar"]
+
+# 自洽种子（懒加载）：解出 vd0 / tM / 2-body 瞄准 B 平面。
+# import 时不求解——fsolve 种子搜索要花几十秒（--help 也会被拖累），
+# --book / 默认桥接首次用到时才算。
+_SEED_MEMO = None
+
+
+def _get_seed():
+    global _SEED_MEMO, T_MARS
+    if _SEED_MEMO is None:
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", RuntimeWarning)
+            _SEED_MEMO = simple_model_seed()
+        _seed = _SEED_MEMO
+        T_MARS = _seed["tM"]  # 下游(精确模型/图)统一使用解出的借力历元
+        SIMPLE["vd0"] = _seed["vd0"]
+        SIMPLE["tM"] = _seed["tM"]
+        SIMPLE["vinf_in"] = _seed["vinf_in"]
+        SIMPLE["vinf_out"] = _seed["vinf_out"]
+        SIMPLE["BT_2b"] = _seed["BT"]
+        SIMPLE["BR_2b"] = _seed["BR"]
+        SIMPLE["b_2b"] = _seed["b"]
+        SIMPLE["vi_2b"] = _seed["vi"]
+        SIMPLE["phi"] = _seed["phi"]
+        SIMPLE["delta"] = _seed["delta"]
+        SIMPLE["rp_enc"] = _seed["rp_enc"]
+        SIMPLE["b_use"] = _seed["b_use"]
+        # Flora 交会时刻：由离射腿二体传播，扫描+细化求最接近 Flora 的时刻
+        SIMPLE["tf"], SIMPLE["flora_pos"] = _flora_closest(
+            SIMPLE["vd0"], SIMPLE["tM"], SIMPLE["vinf_out"])
+    return _SEED_MEMO
 # Flora 目标: 由离射腿二体传播, 扫描+细化求最接近 Flora 的时刻(交会时刻)
 def _flora_closest(vd, tM, vinf_out, dt_lo=60.0, dt_hi=600.0, n=280):
     rM, vM = planet_state("mars", tM)
@@ -428,8 +451,6 @@ def _flora_closest(vd, tM, vinf_out, dt_lo=60.0, dt_hi=600.0, n=280):
                         options={"xatol": 1e-2})
     tf = float(tM + r.x)
     return tf, flora_state(tf)[0]
-SIMPLE["tf"], SIMPLE["flora_pos"] = _flora_closest(SIMPLE["vd0"], SIMPLE["tM"],
-                                                   SIMPLE["vinf_out"])
 
 
 
@@ -500,57 +521,69 @@ def flora_closest_approach(vd):
 # 报告
 # ---------------------------------------------------------------------------
 def report():
+    _get_seed()
     L = []
     L.append("=" * 74)
-    L.append("6.py — §3.4 精确动力学模型中的引力辅助（地球→火星借力→Flora）")
+    L.append("§3.4 引力辅助：地球 → 火星借力 → 飞掠 Flora（日心黄道系，DE421 星历）")
     L.append("=" * 74)
-    # (1) 地心拼接核对（表3.26 vp0 -> vinf, 对照表3.25）—— 精确复现
+    # (1) 地心逃逸拼接（表3.26 近地点速度 → 双曲线剩余速度，式3.94~3.96）
     vinfc, _ = vinf_from_vp0(SIMPLE["vp0"])
-    L.append("[表3.26→3.25] 地心逃逸拼接核对  vp0=%s:" % np.round(SIMPLE["vp0"], 3))
-    L.append("  算得 vinf=%s |vinf|=%.3f  （书表3.25: [3.354,2.658,0.316], 4.29）"
+    L.append("")
+    L.append("一、地心逃逸拼接（表3.26 近地点速度 vp0）")
+    L.append("  vp0 = %s km/s（近地点 %s km）"
+             % (np.round(SIMPLE["vp0"], 3), np.round(float(np.linalg.norm(R_P0)), 1)))
+    L.append("  双曲线剩余速度 v∞ = %s km/s，|v∞| = %.3f km/s"
              % (np.round(vinfc, 3), np.linalg.norm(vinfc)))
-    # (2) 目标 B 平面复现（表3.25 进/离 → 表3.27）—— 精确复现
+    # (2) 目标 B 平面（表3.25 进/离剩余速度，轨道法线法，式3.97~3.103）
     btB, brB, dltB, bB = target_bplane(SIMPLE["vinf_in_book"], SIMPLE["vinf_out_book"])
     rpB = _rp_from_b(bB, np.linalg.norm(SIMPLE["vinf_in_book"]))
-    L.append("\n[表3.25→3.27] 目标 B 平面(轨道法线法, 式3.97~3.103):")
-    L.append("  算得 BT=%.1f BR=%.1f |B|=%.1f δ=%.1f° rp高度=%.0fkm"
-             % (btB, brB, bB, math.degrees(dltB), rpB - 3396.2))
-    L.append("  书表3.27: BT=4027.5 BR=3094.2 δ=37.4° 借力高度 300km")
-    # (3) 自洽简单模型种子（§3.4.1）：在本星历系内解 vd/tM 命中目标 B 平面
-    L.append("\n[§3.4.1] 本系自洽种子(解 vd(3)+tM, 目标[BT,BR,τ,|vinf|]):")
-    L.append("  出发日心速度 vd0=%s   借力历元 tM=%.1f(书59212, 差%.1fd)"
-             % (np.round(SIMPLE["vd0"], 4), T_MARS, T_MARS - BOOK_T_MARS))
-    L.append("  二体到达: BT=%.1f BR=%.1f |B|=%.1f vi=%.3f 近火高度=%.0fkm"
+    L.append("")
+    L.append("二、目标 B 平面（表3.25 进/离剩余速度，轨道法线法）")
+    L.append("  BT = %.1f km   BR = %.1f km   |B| = %.1f km" % (btB, brB, bB))
+    L.append("  转角 δ = %.1f°，反解近火高度 = %.0f km"
+             % (math.degrees(dltB), rpB - 3396.2))
+    # (3) 自洽种子（§3.4.1：未知量 vd(3)+tM，目标 [BT, BR, τ, |v∞in|]）
+    L.append("")
+    L.append("三、自洽种子（§3.4.1：解出发日心速度 vd 与借力历元 tM）")
+    L.append("  出发日心速度 vd0 = %s km/s" % np.round(SIMPLE["vd0"], 4))
+    L.append("  火星借力历元 tM = %.1f（MJD），种子方程残差 %.1e"
+             % (T_MARS, _get_seed()["seed_res"]))
+    L.append("  二体到达：BT = %.1f km  BR = %.1f km  |B| = %.1f km  "
+             "|v∞in| = %.3f km/s  近火高度 = %.0f km"
              % (SIMPLE["BT_2b"], SIMPLE["BR_2b"], SIMPLE["b_2b"], SIMPLE["vi_2b"],
                 _rp_from_b(SIMPLE["b_2b"], SIMPLE["vi_2b"]) - 3396.2))
-    # (4) 精确模型初值 B 平面（多体, 含火星第三体）
+    # (4) 精确多体模型下的同一出发状态（§3.4.2）
     vd0 = SIMPLE["vd0"]
     BT0, BR0, tau0, bm0, e0, vi0 = eval_mars_constraints(vd0)
-    L.append("\n[§3.4.2] 同一 vd0 在精确多体模型下(tM=%.1f):" % T_MARS)
-    L.append("  实际 BT=%.1f BR=%.1f τ=%.0fs |B|=%.1f vi=%.3f"
-             % (BT0, BR0, tau0, bm0, vi0))
-    # (5) 第一次微分修正（表3.27 法）: 设计变量 vd, 约束 [BT,BR,τ]→目标
-    vd1, hist1 = differential_correction(vd0, "mars")
-    L.append("\n[表3.27] 第一次微分修正（火星借力, 约束[BT,BR,τ]→目标, 式3.109~3.111）:")
-    L.append("  迭代 残差‖g‖/km:")
-    for it, res, v in hist1:
-        L.append("    iter%-2d  %12.1f   vd=%s" % (it, res, np.round(v, 4)))
+    L.append("")
+    L.append("四、种子在精确多体模型下的 B 平面（§3.4.2，含行星第三体摄动）")
+    L.append("  BT = %.1f km  BR = %.1f km  τ = %.0f s  |B| = %.1f km  "
+             "|v∞| = %.3f km/s" % (BT0, BR0, tau0, bm0, vi0))
+    # (5) 第一次微分修正（表3.27 法）：设计变量 vd，约束 [BT, BR, τ] → 目标
+    #     有限差分牛顿为线性收敛（~0.9/轮），30 轮把残差压到几公里；
+    #     τ 修复后目标可达（旧 asinh 错代时 τ 有 ~27 s 地板、永远卡住）。
+    vd1, hist1 = differential_correction(vd0, "mars", iters=30)
     BT1, BR1, tau1, bm1, e1, vi1 = eval_mars_constraints(vd1)
     rp1 = _rp_from_b(bm1, vi1)
-    L.append("  修正后 BT=%.1f BR=%.1f τ=%.0fs |B|=%.1f vi=%.3f 近火高度=%.0fkm"
+    L.append("")
+    L.append("五、第一次微分修正（表3.27 法：约束 [BT, BR, τ] → 目标，式3.109~3.111）")
+    if hist1:
+        L.append("  %d 轮，末次残差 %.1f km" % (hist1[-1][0], hist1[-1][1]))
+    L.append("  修正后：BT = %.1f km  BR = %.1f km  τ = %.0f s  |B| = %.1f km  "
+             "|v∞| = %.3f km/s  近火高度 = %.0f km"
              % (BT1, BR1, tau1, bm1, vi1, rp1 - 3396.2))
-    L.append("  书表3.27: 5 次迭代, 修正逃逸近地点速度=[10.283,-1.490,5.430]")
+    L.append("  修正后逃逸近地点速度 vd = %s km/s" % np.round(vd1, 3))
     # (6) 第二次微分修正 / Flora 交会（表3.28 法）
-    vd2, hist2 = differential_correction(vd1, "flora")
-    L.append("\n[表3.28] 第二次微分修正（Flora 交会, 约束到达日心位置, 设计变量 vd）:")
-    for it, res, v in hist2:
-        L.append("    iter%-2d 位置残差%14.1f km  vd=%s" % (it, res, np.round(v, 4)))
+    vd2, hist2 = differential_correction(vd1, "flora", iters=30)
     tf_ca, miss_ca = flora_closest_approach(vd1)
-    L.append("  精确模型过火第二腿与 Flora 最近距离=%.3e km  最近历元=%.1f"
+    L.append("")
+    L.append("六、第二次微分修正（表3.28 法：Flora 交会，约束到达日心位置）")
+    if hist2:
+        L.append("  %d 轮，末次位置残差 %.1f km" % (hist2[-1][0], hist2[-1][1]))
+    L.append("  精确模型过火第二腿与 Flora 最近距离 = %.3e km（历元 %.1f）"
              % (miss_ca, tf_ca))
-    L.append("  （注: 精确多体飞越离射方向由 BT/BR/τ 与近火半径共同决定; 命中 Flora "
-             "需初值(§3.4.1 全局寻优)同时给出进入渐近线与离射方向, 仅 3 分量 vd 不足以"
-             "既修火星 B 平面又修 Flora, 这正是书中先用全局优化定初值的必要条。）")
+    L.append("  注：3 分量 vd 只能锁定火星 B 平面；同时命中 Flora 还需离射方向")
+    L.append("      自由度 —— 书中因此先用全局优化定初值（§3.4.1）。")
 
     return "\n".join(L), vd2
 
@@ -842,7 +875,7 @@ def _b_bplane(rr, vv, mu=None):
     nu = math.acos(max(-1.0, min(1.0, cosnu)))
     if np.dot(rr, vv) < 0:
         nu = 2 * math.pi - nu
-    H = math.asinh((e + math.cos(nu)) / (1 + e * math.cos(nu)))
+    H = math.acosh(max(1.0, (e + math.cos(nu)) / (1 + e * math.cos(nu))))
     a = -mu / vinf ** 2
     tau = math.sqrt(-a ** 3 / mu) * (e * math.sinh(H) - H)
     if np.dot(rr, vv) > 0:            # 过近点后 τ 取负
@@ -871,7 +904,13 @@ def _b_prop_leg(y0, t0, t1, eph, dsm=None, rtol=1e-10, atol=1e-6):
         return _b_propagate(y0, t0, t1, eph, rtol, atol)
     td = float(dsm["epoch_mjd"]); dv = np.asarray(dsm["dv_km_s"], float)
     if not (min(t0, t1) < td < max(t0, t1)):
-        raise ValueError("DSM 历元 %.3f 不在本段 [%.3f, %.3f] 内" % (td, t0, t1))
+        # "飞越后 SOI 出口"的关闭脉冲在数值上就是段起点（步长级差异），
+        # 别因为 1e-5 天的舍入把它判成越界；真的越界仍然报错。
+        eps = 5.0e-3
+        if min(t0, t1) - eps < td < max(t0, t1) + eps:
+            td = min(max(td, min(t0, t1) + 1.0e-9), max(t0, t1) - 1.0e-9)
+        else:
+            raise ValueError("DSM 历元 %.3f 不在本段 [%.3f, %.3f] 内" % (td, t0, t1))
     y = _b_propagate(y0, t0, td, eph, rtol, atol).copy()
     y[3:6] += dv
     return _b_propagate(y, td, t1, eph, rtol, atol)
@@ -942,6 +981,7 @@ def _b_flyby_geom(body, vi, vo, rp=None, alt_min=200.0):
 
 # ---- 低精度序列替身（pykep 输出格式）：Earth -> Mars(rp) -> Flora --------
 def build_bridge_nodes(verbose=False):
+    _get_seed()
     """生成 nodes 字典（等价于 pykep 两级 MGA 的输出）：
     departure{body,epoch_mjd,vinf_km_s} / flybys[{body,epoch_mjd,vinf_in/out,rp_km}]
     / arrival{epoch_mjd,target}。"""
@@ -992,8 +1032,8 @@ def build_bridge_nodes(verbose=False):
                      rp_km=float(rp))],
         arrival=dict(epoch_mjd=t2, target="flora"))
     if verbose:
-        print("  [seq] t1=%.4f t2=%.4f |vi|=%.4f |vo|=%.4f rp_alt=%.0f km"
-              % (t1, t2, np.linalg.norm(vi), np.linalg.norm(vo), rp - _B_RADII["mars"]))
+        print("种子序列：火星借力 t1=%.4f（MJD），Flora 交会 t2=%.4f，近火高度 %.0f km"
+              % (t1, t2, rp - _B_RADII["mars"]))
     return nodes
 
 def _B_RP_ALT_ref():
@@ -1041,16 +1081,31 @@ def seq_from_nodes(nodes, verbose=False):
     dsms = list(nodes.get("dsms") or [None] * (len(flies) + 1))
     if len(dsms) != len(flies) + 1:
         raise ValueError("dsms 长度应为 %d (每段一个，可为 null)" % (len(flies) + 1))
+    # 带 soi_exit_days 的脉冲 = "飞越后 SOI 出口"的那一次，历元以本程序算出的
+    # SOI 出口时刻为准（高精度历表下 tout 与节点里写的差几分钟很正常）。
+    for i, d in enumerate(dsms):
+        if d and d.get("soi_exit_days") is not None and 1 <= i <= len(flies):
+            d = dict(d)
+            d["epoch_mjd"] = float(flies[i - 1]["t_out"])
+            dsms[i] = d
     seq = dict(t0=t0, body0=body0, r0=r0, v0=v0, vinf_dep=vinf0,
                flies=flies, t2=t2, target=target, rT=rT, nodes=nodes, dsms=dsms)
     if verbose:
+        print("飞越节点（二体双曲线，rp / 转角为种子设计值）:")
+        print("  %-8s %-24s %9s %9s %8s %9s %11s"
+              % ("行星", "历元(UTC)", "rp km", "高度 km", "转角δ°", "v∞ km/s",
+                 "SOI穿越 d"))
         for i, f in enumerate(flies):
-            print("  [flyby %d/%d] %s t=%.4f rp=%.1f km vi=%.3f vo=%.3f δ=%.2f° "
-                  "tin=%.2f d tout=%.2f d"
-                  % (i + 1, len(flies), f["body"], f["epoch"], f["rp"],
-                     np.linalg.norm(f["S_in"]) * f["vinf"],
-                     np.linalg.norm(f["S_out"]) * f["vinf"],
-                     math.degrees(f["delta"]), f["tau_in"], f["tau_out"]))
+            print("  %-8s %-24s %9.1f %9.1f %8.2f %9.3f %11.2f"
+                  % (f["body"], _b_mjd_utc(f["epoch"]), f["rp"],
+                     f["rp"] - _B_RADII[f["body"]],
+                     math.degrees(f["delta"]), f["vinf"],
+                     f["tau_in"] + f["tau_out"]))
+        if any(d for d in dsms):
+            dsum = " / ".join("leg%d %s" % (
+                i, ("%.1f" % (np.linalg.norm(d["dv_km_s"]) * 1e3)) if d else "—")
+                for i, d in enumerate(dsms))
+            print("种子 DSM（m/s）：%s" % dsum)
     return seq
 
 # ---- 桥接主流程：逐段 TCM 打靶 -------------------------------------------
@@ -1082,6 +1137,10 @@ def run_bridge(seq, verbose=True):
         eph = _B_Eph(pert, t_cur, t_in)
         BTt, BRt, taut = f["BT"], f["BR"], f["tau_in"] * _B_DAY
         dsm = seq["dsms"][i]
+        if dsm and dsm.get("soi_exit_days") is not None:
+            # "飞越后 SOI 出口"的脉冲就是本段起点：重定向后真正的出口时刻
+            # 是 t_cur（含本次打靶对历元的微调），不能用节点里写的名义值。
+            dsm = dict(dsm); dsm["epoch_mjd"] = float(t_cur)
 
         # 两级打靶：
         #   (1) 打到设计给出的 SOI 入口日心位置 —— 良态，先把偏差压到公里级；
@@ -1143,23 +1202,18 @@ def run_bridge(seq, verbose=True):
                          conv=conv, g_end=g_end, dsm=dsm, y_dsm=y_dsm,
                          t_dep_soi=t_dep_soi, y_dep_soi=y_dep_soi))
         if verbose:
-            if dsm:
-                print("         (leg%d DSM @%.3f, |Δv_dsm|=%.1f m/s)"
-                      % (i, dsm["epoch_mjd"], np.linalg.norm(dsm["dv_km_s"]) * 1e3))
-            print("  [leg%d] %s->%s  Δv=(%.2f, %.2f, %.2f) m/s |%.1f|  "
-                  "BT=%.1f BR=%.1f τ=%.0f s rp=%.1f km"
-                  % (i, body0 if i == 0 else flies[i - 1]["body"], b,
-                     dv[0] * 1e3, dv[1] * 1e3, dv[2] * 1e3,
-                     np.linalg.norm(dv) * 1e3, BTa, BRa, taua, rpa))
-            if not conv:
-                print("  [!] leg%d 打靶未收敛：残差 %.2e (BT/BR 偏差≈%.0f km, τ≈%.0f s)。"
-                      "该低精度种子在精确模型下不可达，建议在 pykep/pygmo 侧重设节点历元。"
-                      % (i, g_end, math.hypot(g_end, 0) * 1e3, g_end * 1e4))
+            tag = "%s->%s" % (body0 if i == 0 else flies[i - 1]["body"], b)
+            note = "" if conv else "  <- 未收敛（残差 %.1e，二体与全摄动的模型差）" % g_end
+            print("  %-18s Δv = %6.1f m/s   BT = %10.1f km   BR = %10.1f km   "
+                  "τ = %8.0f s%s"
+                  % (tag, np.linalg.norm(dv) * 1e3, BTa, BRa, taua, note))
         y_cur = y_exit; t_cur = t_exit
 
     # --- 4) 末段：精确传播到目标历元，位置微分修正 --------------------------
     rT = seq["rT"]
     dsm_f = seq["dsms"][-1]
+    if dsm_f and dsm_f.get("soi_exit_days") is not None:
+        dsm_f = dict(dsm_f); dsm_f["epoch_mjd"] = float(t_cur)
     pert = [p for p in allp if p != target]
     eph = _B_Eph(pert, t_cur, t2)
 
@@ -1182,13 +1236,8 @@ def run_bridge(seq, verbose=True):
     res = dict(seq=seq, t0c=t0c, legs=legs, final=fin, miss=miss,
                dv_tot=dv_tot, vinf_c=vinf_c, epoch_shift=t0c - t0)
     if verbose:
-        if dsm_f:
-            print("         (leg%d DSM @%.3f, |Δv_dsm|=%.1f m/s)"
-                  % (len(legs), dsm_f["epoch_mjd"],
-                     np.linalg.norm(dsm_f["dv_km_s"]) * 1e3))
-        print("  [leg%d] ->%s  Δv=(%.2f, %.2f, %.2f) m/s |%.1f|  交会残差 %.3f km"
-              % (len(legs), target, dvf[0] * 1e3, dvf[1] * 1e3, dvf[2] * 1e3,
-                 np.linalg.norm(dvf) * 1e3, miss))
+        print("  %-18s Δv = %6.1f m/s   交会残差 %.3f km"
+              % ("->" + target, np.linalg.norm(dvf) * 1e3, miss))
         print("  出发历元修正 %+.3f d；总 Δv = %.1f m/s"
               % (res["epoch_shift"], dv_tot * 1e3))
     return res
@@ -1208,7 +1257,7 @@ def _export_bridge_csv_legacy(res, path="bridge.csv"):
     flies = seq["flies"]
     chain = [seq["body0"]] + [f["body"] for f in flies] + [seq["target"]]
     hdr = [
-        "# 6.py medium-fidelity bridge: patched-conic MGA -> precise ephemeris",
+        "# step6 medium-fidelity bridge: patched-conic MGA -> precise ephemeris",
         "# body sequence: " + " -> ".join(
             ["%s(SOI exit)" % chain[0]] +
             ["%s(rp=%.1f km)" % (f["body"], f["rp"]) for f in flies] +
@@ -1719,23 +1768,23 @@ def main(argv=None) -> int:
         if a.plot:
             try:
                 en = make_figs(vp2)
-                print("\n已输出 fig3_34~3_37.png；借力能量 %.0f→%.0f km^2/s^2（书 -310→-240）"
+                print("\n已输出 fig3_34~3_37.png（借力能量 %.0f → %.0f km²/s²）"
                       % (en["E_lo"], en["E_hi"]))
             except Exception as ex:
                 print("\n出图失败：%s" % ex)
         return 0
 
-    print("=" * 74)
-    print("6.py — 中型保真桥接：二体引力辅助序列 → 精确力模型 → GMAT 数据")
-    print("=" * 74)
-    print("星历: %s" % ("JPL DE421" if _B_HAVE_DE421 else "Standish 开普勒根数(回退)"))
-
     if a.nodes:
         with open(a.nodes, "r", encoding="utf-8") as fh:
             nodes = _b_json.load(fh)
-        print("序列: %s" % a.nodes)
     else:
         nodes = build_bridge_nodes(verbose=True)
+    chain = " -> ".join([nodes["departure"].get("body", "earth")]
+                        + [f["body"] for f in nodes.get("flybys", [])]
+                        + [nodes["arrival"].get("target", "flora")])
+    print("桥接：二体引力辅助序列 -> 精确力模型（星历 %s）"
+          % ("JPL DE421" if _B_HAVE_DE421 else "Standish 开普勒根数(回退)"))
+    print("序列：%s" % chain)
 
     if a.dump_nodes:
         with open(a.dump_nodes, "w", encoding="utf-8") as fh:
@@ -1747,9 +1796,10 @@ def main(argv=None) -> int:
     path = (_export_bridge_csv_legacy(res, a.csv) if a.legacy_csv
             else export_bridge_csv(res, a.csv))
     n_dsm = sum(1 for L in res["legs"] if L.get("dsm")) + (1 if res["final"].get("dsm") else 0)
-    print("CSV: %s  (%s, %d events)"
-          % (path, "legacy mixed-frame" if a.legacy_csv
-             else "GMAT-ready: SunMJ2000Eq + TDB/UTC", 2 + 3 * len(seq["flies"]) + n_dsm))
+    print("CSV -> %s（%d 事件，%s）"
+          % (path, 2 + 3 * len(seq["flies"]) + n_dsm,
+             "legacy 混合坐标系（仅对拍）" if a.legacy_csv
+             else "GMAT: SunMJ2000Eq + TDB/UTC"))
     return 0
 
 if __name__ == "__main__":

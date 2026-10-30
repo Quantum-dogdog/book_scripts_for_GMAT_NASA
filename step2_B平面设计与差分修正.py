@@ -1,45 +1,28 @@
 """
-火星探测器 · 火心段 B 平面设计与精确模型差分修正（单文件）
-==========================================================
+step2 · 火心段 B 平面设计与差分修正（书 §1.2.3 / §1.3）
 
-对应书 §1.2.3（火心段参数设计 / B 平面）与 §1.3（精确模型下轨道参数修正）。
+算什么：
+  A 初步设计（圆锥拼接）：目标倾角 i2、近火点半径 rp2、到达剩余速度 V∞2
+    → 标称 B^nom = [BT, BR, τ]
+  B 精确模型修正：日心 N 体传播（日 + 金/木/土）→ 实际 B 平面 →
+    数值雅可比 K = ∂[BT,BR,τ]/∂v0 → Δv0 = K⁻¹(B^nom − F(v0))，牛顿迭代到残差→0
+  C 与 step1 的接口只有一组 dep/arr 字符串：dep 填 step1 报告给出的"实际出 SOI
+    时刻"（可带 HH:MM:SS），Lambert 初值就与探测器真实日心状态同源，
+    修正量降到 m/s 级。
 
-链路：
-  A. 初步设计（圆锥拼接，§1.2.3，式 1.13~1.17）
-     由目标倾角 i2、近火点半径 r_p2 与到达剩余速度 V∞2 → 标称 B^nom = [BT, BR, τ]
-  B. 精确模型（§1.3，式 1.18~1.33）
-     日心 N 体传播（太阳 + 金/木/土，间接第三体项）
-     终端状态 → 实际 B 平面（式 1.21~1.30）
-     数值雅可比 K = ∂[BT,BR,τ]/∂v0（式 1.31）
-     差分修正 Δv0 = K⁻¹(B^nom − F(v0))（式 1.33），牛顿迭代到残差→0
-  C. 与 dihuo1.py 的接口（发射链路 → 火心段）：
-     dihuo1 的 GMAT 状态（A1/A1c/B）从地球出发；本脚本用同一组 dep/arr
-     自跑 Lambert 得日心初值。departure 建议直接填 dihuo1 报告的
-     "实际出 SOI 时刻"（可带 HH:MM:SS），使 Lambert 初值与探测器真实
-     日心状态同源 → 差分修正量降到 m/s 级；两脚本接口 = dep/arr 字符串。
-
-模型约定与已知敏感度（读数前必看）：
-  · 历表时刻按 UTC≈TT 处理（差 ~69 s，到达端火星位置差 ~1.6e3 km，
-    由差分修正吸收；与书对账时可忽略）。
-  · N 体模型下 BT/BR/τ 仅在二体极限内严格沿双曲线不变；潮汐摄动使
-    SOI 入口与近火点处的 osculating B 相差 ~10–100 km。因此目标函数 F
-    的"模型内"定义精度即 ~10 km 量级；修正容差 1e-6（归一化，
-    ≈1 m / 0.1 s）远深于该敏感度，属模型内收敛，物理上以 ~10 km 计。
-  · 评估点规则（scipy 与 RK4 降级路径统一）：在接近段窗口
-    [t1-10d, t1+2d] 内找最近接近点；真实掠过（dmin<SOI）取入段 SOI
-    穿越，否则取最近接近点。τ 换算回 t1 基准（τ+t_eval 恒等式）。
+读数前必知的两条约定：
+  · 历表时刻按 UTC≈TT 处理（差 ~69 s），到达端误差由差分修正吸收。
+  · N 体下 BT/BR/τ 只在二体极限内严格沿双曲线不变；潮汐摄动让 SOI 入口与
+    近火点的 osculating B 相差 ~10 km。残差收敛到 1e-6（归一化）是模型内收敛，
+    物理精度按 ~10 km 计。
 
 用法：
-  python 2.py                                        # 2015 窗口1（默认，书表1.2）
-  python 2.py --dep 2020-07-25 --arr 2021-02-11
-  python 2.py --dep "2020-07-21 17:59:19" --arr 2021-01-30   # dep 可带时刻(交棒钟)
-  python 2.py --i2 95 --rp2 400                      # 目标倾角 / 近火点高度(km)
-  python 2.py --no-correct                           # 只出初步设计
-  python 2.py --book                                 # 与教材表1.3/1.5 对账
-  python 2.py --selftest                             # 内置自检（1~2 分钟）
+  python step2_B平面设计与差分修正.py                      # 默认 2015-12-25 → 2016-09-29
+  python step2_B平面设计与差分修正.py --dep 2020-07-25 --arr 2021-02-11
+  python step2_B平面设计与差分修正.py --i2 95 --rp2 400    # 目标倾角 / 近火点高度(km)
+  python step2_B平面设计与差分修正.py --no-correct         # 只出初步设计
 
-只依赖 numpy（差分修正推荐 scipy 的 solve_ivp；无 scipy 时自动降级为
-存档 + 局部细步 RK4，两条路径的评估规则完全一致）。
+依赖 numpy；有 scipy 就用 solve_ivp，没有则自动降级细步 RK4（评估规则一致）。
 """
 
 from __future__ import annotations
@@ -133,7 +116,7 @@ def fmt_dt(t: datetime) -> str:
 
 
 def parse_dt(s: str) -> datetime:
-    """宽容解析：YYYY-MM-DD 或 'YYYY-MM-DD HH:MM[:SS]'（与 dihuo1 交棒约定一致）"""
+    """宽容解析：YYYY-MM-DD 或 'YYYY-MM-DD HH:MM[:SS]'（与 step1 交棒约定一致）"""
     s = s.strip()
     for f in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
@@ -550,60 +533,6 @@ def _jd(dt: datetime) -> float:
     return (dt - J2000).total_seconds() / 86400.0 + 2451545.0
 
 
-def book_check(i2=95.0):
-    """用书自身数据（表1.3 窗口2 V∞2、表1.5 修正后 B）复现式1.13~1.17，逐项对账。
-    书表1.5 是"微分修正后"终端 B = 标称 B^nom（式1.17），故只要用表1.3 的
-    V∞2 与书取的 r_p2 走式1.16/1.17，就应精确复现表1.5 修正后那一列。
-    """
-    V2 = np.array([-2.4726, -2.0737, -1.6583])   # 表1.3 窗口2 V∞2 分量
-    n2 = float(np.linalg.norm(V2))
-    S = V2 / n2
-    N = N_REF
-    T = np.cross(S, N); T /= np.linalg.norm(T)
-    R = np.cross(S, T)
-    alpha = math.degrees(math.atan2(V2[1], V2[0])) % 360
-    dec = math.degrees(math.asin(S[2]))
-    # 表1.5 修正后 BT/BR（书结果）→ 反解书用的 r_p2
-    BTb, BRb = -702.5, -7212.32
-    Bmag_b = math.hypot(BTb, BRb)
-    rp2 = -MU_MARS / n2 ** 2 + math.sqrt((MU_MARS / n2 ** 2) ** 2 + Bmag_b ** 2)
-    # 式1.16/1.17 正向复现
-    Bmag = math.sqrt(rp2 ** 2 + 2 * rp2 * MU_MARS / n2 ** 2)
-    th = math.degrees(math.acos(math.cos(math.radians(i2))
-                                / math.cos(math.radians(dec))))
-    BT = Bmag * math.cos(math.radians(th))
-    BR = Bmag * math.sin(math.radians(th))
-    L = []
-    L.append("=" * 70)
-    L.append("与教材对账：式1.13~1.17 复现表1.5（修正后 = 标称 B^nom）")
-    L.append("=" * 70)
-    L.append("[式1.13] Ŝ 由 V∞2 归一化")
-    L.append("  α∞2 = %.2f° (书 220.0)   δ∞2 = %.2f° (书 -27.2)   |V∞2| = %.4f (书 3.6282)"
-             % (alpha, dec, n2))
-    L.append("  → 书 δ∞2 = asin(Vz/|V|) 即出黄纬，参考轴 = Z（式1.14 印证）")
-    L.append("")
-    L.append("[式1.14] T̂=(Ŝ×N̂)/‖·‖,  R̂=Ŝ×T̂")
-    L.append("  T̂ = [%+.6f %+.6f %+.6f]   N̂·T̂=%.1e (T̂ 在参考面内 ✓)"
-             % (*T, float(N @ T)))
-    L.append("  R̂ = [%+.6f %+.6f %+.6f]   R̂·N̂=%+.4f (图1.12 R̂ 朝下 ✓)"
-             % (*R, float(R @ N)))
-    L.append("")
-    L.append("[式1.17] 由表1.5 修正后 B 反解书用 r_p2 = %.2f km (高度 %.1f)"
-             % (rp2, rp2 - R_MARS))
-    L.append("  ‖B‖: 正向复现 %.2f（rp2 即由表1.5 ‖B‖=%.2f 反解，自洽性打印）"
-             % (Bmag, Bmag_b))
-    L.append("  θ(钟角) = %.3f°   cos i=cosθcosδ → i=%.3f° (目标 %.1f°)"
-             % (th, math.degrees(math.acos(math.cos(math.radians(th))
-                                           * math.cos(math.radians(dec)))), i2))
-    L.append("  BT: 复现 %+.2f   表1.5 %+.2f   差 %+.3f km" % (BT, BTb, BT - BTb))
-    L.append("  BR: 复现 %+.2f   表1.5 %+.2f   差 %+.3f km" % (BR, BRb, BR - BRb))
-    L.append("  → BT/BR 同号同量级即式1.17 复现成功（R̂ 手性约定可致 BR 反号，见下）")
-    L.append("  若取 R̂'=T̂×Ŝ（书式1.14 R̂=Ŝ×T̂ 的反向），BR=%+.2f 与书 %+.2f 同号"
-             % (-BR, BRb))
-    L.append("=" * 70)
-    return "\n".join(L)
-
-
 def compute(i2=95.0, rp2_alt=400.0, correct=True, dep=None, arr=None):
     """
     默认窗口1（书表1.2）：2015-12-25 → 2016-09-29，转移 278 天。
@@ -611,7 +540,7 @@ def compute(i2=95.0, rp2_alt=400.0, correct=True, dep=None, arr=None):
     （由表1.5 反解）约 1294 km —— 对书请用 --rp2 1294。
     式1.16 不可达（|cos i2| > cos δ∞2）时跳过差分修正。
 
-    接口约定：dep/arr 与 dihuo1 同源。dep 建议填 dihuo1 报告的
+    接口约定：dep/arr 与 step1 同源。dep 建议填 step1 报告的
     "实际出 SOI 时刻"（可带 HH:MM:SS），Lambert 初值即探测器真实
     日心状态的同源近似。r0 取地球中心而非 SOI 出口点：拼接圆锥的
     标准接口，~0.6% 的位置偏移由差分修正调 v0 吸收（B 平面对 v0
@@ -739,110 +668,6 @@ def report(r) -> str:
     return "\n".join(L)
 
 
-# ---------------------------------------------------------------------------
-# 内置自检
-# ---------------------------------------------------------------------------
-def selftest() -> int:
-    ok = True
-    print("=" * 70)
-    print("自检 1/2：bplane_from_state 二体不变性（同一双曲线两个时刻）")
-    print("=" * 70)
-    mu = MU_MARS
-    vinf = 3.4
-    rp = 3800.0
-    e = 1.0 + rp * vinf ** 2 / mu
-    p = rp * (1.0 + e)
-    S_in = unit(np.array([0.3, -0.8, 0.52]))   # 入射速度渐近线
-    N = N_REF
-    T = unit(np.cross(S_in, N))
-    R = np.cross(S_in, T)
-    th = math.radians(60.0)
-    b = math.sqrt(rp ** 2 + 2.0 * rp * mu / vinf ** 2)
-    Bv = b * (math.cos(th) * T + math.sin(th) * R)
-    n_hat = unit(np.cross(Bv / b, S_in))        # n̂ = B̂×Ŝ ⇒ Ŝ×n̂ = B̂
-    # 由 (Ŝ, n̂) 构造近地点基：S = cosθb·P̂ + sinθb·Q̂, θb=acos(1/e)
-    th_b = math.acos(1.0 / e)
-    cb, sb = math.cos(th_b), math.sin(th_b)
-    X = np.cross(n_hat, S_in)
-    P = cb * S_in - sb * X                      # 近地点方向
-    Q = sb * S_in + cb * X                      # Q̂ = n̂×P̂
-
-    def state_at(f):
-        """给定真近点角（入段 f<0），返回 (r, v, 距近火点时间 t<0)"""
-        r_abs = p / (1.0 + e * math.cos(f))
-        r = r_abs * (math.cos(f) * P + math.sin(f) * Q)
-        v = math.sqrt(mu / p) * (-math.sin(f) * P
-                                 + (e + math.cos(f)) * Q)
-        coshH = (e + math.cos(f)) / (1.0 + e * math.cos(f))
-        H = -math.acosh(coshH)                  # 入段 H<0
-        M = e * math.sinh(H) - H
-        n_h = math.sqrt(mu / (mu / vinf ** 2) ** 3)
-        return r, v, M / n_h
-
-    f1, f2 = -0.55 * math.acos(-1.0 / e), -0.28 * math.acos(-1.0 / e)
-    r1, v1, t1_ = state_at(f1)
-    r2, v2, t2_ = state_at(f2)
-    bp1 = bplane_from_state(r1, v1)
-    bp2 = bplane_from_state(r2, v2)
-    checks = [
-        ("S 复现", float(np.max(np.abs(bp1.S - S_in))) < 1e-9),
-        ("BT 沿双曲线不变", abs(bp1.BT - bp2.BT) < 1e-6 * b),
-        ("BR 沿双曲线不变", abs(bp1.BR - bp2.BR) < 1e-6 * b),
-        ("BT = b·cosθ", abs(bp1.BT - b * math.cos(th)) < 1e-6 * b),
-        ("BR = b·sinθ", abs(bp1.BR - b * math.sin(th)) < 1e-6 * b),
-        ("B⃗ ⊥ Ŝ", abs(float(np.dot(bp1.Bv / np.linalg.norm(bp1.Bv),
-                                    S_in))) < 1e-9),
-        ("r_p 复现", abs(bp1.r_p - rp) / rp < 1e-8),
-        ("v_inf 复现", abs(bp1.v_inf - vinf) < 1e-9),
-        ("i = acos(n̂·N̂)", abs(bp1.i - math.degrees(math.acos(
-            float(n_hat @ N)))) < 1e-9),
-        ("τ 平移一致 τ1−τ2 = t2−t1",
-         abs((bp1.tau - bp2.tau) - (t2_ - t1_)) < 1e-6),
-    ]
-    for name, passed in checks:
-        print("  [%s] %s" % ("✓" if passed else "✗", name))
-        ok = ok and passed
-
-    print("=" * 70)
-    print("自检 2/2：零摄动差分修正收敛（_PERTURBERS=[]，短弧仅验数值）")
-    print("=" * 70)
-    saved = list(_PERTURBERS)
-    _PERTURBERS.clear()
-    try:
-        dep = datetime(2015, 12, 25)
-        arr = dep + timedelta(days=60)   # 缩短弧段加速自检，非物理窗口
-        t0 = (_jd(dep) - 2451545.0) * 86400.0
-        t1 = (_jd(arr) - 2451545.0) * 86400.0
-        re, _ve = helio_state("earth", t0)
-        rm, vm = helio_state("mars", t1)
-        vl1, vl2 = lambert(re, rm, t1 - t0)
-        V2 = vl2 - vm
-        v2m = float(np.linalg.norm(V2))
-        r_p2 = R_MARS + 400.0
-        Bmag = math.sqrt(r_p2 ** 2 + 2.0 * r_p2 * MU_MARS / v2m ** 2)
-        dec2 = math.degrees(math.asin(max(-1.0, min(1.0,
-                            float(np.dot(V2 / v2m, N_REF))))))
-        cos_th = max(-1.0, min(1.0,
-                     math.cos(math.radians(95.0)) / math.cos(math.radians(dec2))))
-        th_deg = math.degrees(math.acos(cos_th))
-        Bnom = [Bmag * math.cos(math.radians(th_deg)),
-                Bmag * math.sin(math.radians(th_deg)), 0.0]
-        print("  （每次迭代含 1 次全程积分，共约 1~3 分钟）")
-        v_start = vl1 + np.array([0.01, 0.0, 0.0])   # 故意偏 10 m/s，逼雅可比符号现形
-        corr = differential_correction(t0, re, v_start, t1, Bnom, max_iter=30)
-        dv = float(np.linalg.norm(corr.v0 - v_start))
-        conv = corr.resid < 1e-5 and corr.iters <= 15
-        moved = dv > 1e-4                             # 必须真的动过
-        print("  [%s] 收敛：残差(归一)=%.2e，迭代 %d 次，Δv=%.2e km/s"
-              % ("✓" if conv and moved else "✗", corr.resid, corr.iters, dv))
-        ok = ok and conv and moved
-    finally:
-        _PERTURBERS.extend(saved)
-    print("=" * 70)
-    print("自检%s" % ("全部通过" if ok else "存在失败"))
-    return 0 if ok else 1
-
-
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="火心段 B 平面设计与精确模型差分修正（单文件）")
@@ -853,22 +678,12 @@ def main(argv=None) -> int:
                          "默认 400 为工程常用）")
     ap.add_argument("--dep", default=None,
                     help="出发日期，可带时刻（如 '2020-07-21 17:59:19'，"
-                         "= dihuo1 实际出SOI交棒钟；默认 2015-12-25，书表1.2）")
+                         "= step1 实际出SOI交棒钟；默认 2015-12-25，书表1.2）")
     ap.add_argument("--arr", default=None,
                     help="到达日期，可带时刻（默认 2016-09-29）")
     ap.add_argument("--no-correct", action="store_true",
                     help="只出初步设计")
-    ap.add_argument("--book", action="store_true",
-                    help="与教材表1.3/1.5 对账（复现式1.13~1.17）")
-    ap.add_argument("--selftest", action="store_true",
-                    help="运行内置自检（二体不变性 + 零摄动修正收敛）后退出")
     a = ap.parse_args(argv)
-
-    if a.book:
-        print(book_check(i2=a.i2))
-        return 0
-    if a.selftest:
-        return selftest()
 
     dep = arr = None
     try:
