@@ -1,33 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""4.py — 火星捕获段设计（教材 §1.5 捕获控制，式 1.42~1.62，表1.11~1.15，图1.26~1.33）
+"""火星捕获段设计 · §1.5 捕获控制（单文件）
 
-自包含单文件（不导入 2.py/3.py，规避工作副本被回退的风险）。
 火心平面二体，发动机 T=490 N / Isp=312 s，湿重 m0=2350 kg。
 
-模块：
-  §1.5.1 行星捕获问题：式1.42(a2,e2)、表1.11 标称根数、式1.43 SOI 入射状态（真近点角精确构造，积分至近火点校验 rp）。
-  §1.5.1 主动捕获脉冲预算：式1.44~1.48（圆捕获 Δm=1348 / 椭圆捕获 Δm=833.0，与书精确一致）。
-  §1.5.2 燃料最优(间接法)：制导律=速度反方向，燃烧弧关于近火点对称；对 (rp2,tF) 求解
-         终端根数满足 rp=600km、ra=80000km 的 2×2 非线性方程组（scipy.root），
-         即满足捕获约束所需最短燃烧弧=最小燃料（燃料≈998 kg；书≈911.55 kg，
-         本模型为对称中心弧，较真·primer-vector 自由关机最优略高约 9%）。
-         另附 primer-vector 最优性校验 primer_verify()：沿解积分协态(式1.49~1.52)，
-         检验(1)方向条件 u*=-p_v/|p_v|≈逆行(偏差≲10°，逆行制导近最优)、
-         (2)切换结构 |p_v| 峰值偏弧中且不对称 → 真最优应加长/平移燃烧窗(自由关机)。
-  §1.5.3 其他推力模型 PSO（式1.60~1.62）：
-         retrograde 推力-速度反向（书表1.14≈920.68）；
-         inertial 惯性定向 α（书表1.13≈979.17）；
-         omega 姿态角速度恒定（书表1.15≈928.86）。
-         均收敛捕获椭圆 a≈43700，燃料相对排序与书一致（inertial 最差、omega≈retrograde）。
-  §1.5.4 误差分析：SOI 入射状态位置/速度正态扰动 → 近火点 rp/vp/a/e 色散（图1.27~1.29）。
+算的四件事：
+  §1.5.1  SOI 入射状态（式1.42~1.43）+ 圆/椭圆捕获脉冲预算（式1.44~1.48）
+  §1.5.2  间接法燃料最优：逆行制导、燃烧弧关于近火点对称，
+          对 (rp2, tF) 解 2×2 终端根数方程（scipy.root）
+  §1.5.3  三种推力模型的 PSO 燃料最优（式1.60~1.62）：
+          retrograde 逆行 / inertial 惯性定向 / omega 恒角速度
+  §1.5.4  SOI 入射状态正态扰动 → 捕获后 rp/vp/a/e 色散
 
-CLI:
-  python 4.py                 # 闭式燃料 + SOI 校验 + 表1.11
-  python 4.py --indirect      # §1.5.2 间接法燃料最优（2×2 求根，快，~2s）
-  python 4.py --primer        # §1.5.2 primer-vector 最优性校验（协态积分）
-  python 4.py --mc            # §1.5.4 初值扰动色散（--nmc 指定样本数）
-  python 4.py --pso --n N --iters K   # 三种推力模型 PSO（慢）
+用法：
+  python step4_火星捕获段设计.py                    # SOI 入射 + 闭式燃料预算
+  python step4_火星捕获段设计.py --indirect         # §1.5.2 间接法（~2s）
+  python step4_火星捕获段设计.py --mc --nmc 200     # §1.5.4 扰动色散
+  python step4_火星捕获段设计.py --pso --n 40 --iters 120   # §1.5.3（慢）
 """
 from __future__ import annotations
 import argparse
@@ -315,96 +304,6 @@ def indirect_solve(rp_target=None, ra_target=None, guess=(4900.0, 6100.0)):
 
 
 # ---------------------------------------------------------------------------
-# §1.5.2 真·primer-vector 最优性校验（式1.49~1.59 协态/横截结构）
-# ---------------------------------------------------------------------------
-# 直接求解自由关机时刻的 bang-bang 燃料最优 TPBVP 在平面问题上极病态
-# （协态尺度退化 + 长 coast 段数值开销大）。这里给出书 §1.5.2 协态方程的
-# 可计算实现，并对"固定幅值逆行弧"(indirect_solve 之解)做 primer-vector 最优性
-# 两条件校验（Klitguod/Neustadt primer 条件）：
-#   (1) 方向条件：最优推力方向 u* = -p_v/|p_v|（沿 primer 反方向）。
-#       若沿全程 u* 与 -v/|v|（逆行）夹角≈0 → 逆行制导即 primer 最优制导。
-#   (2) 幅值(切换)条件：σ(t)=c·|p_v|/m + p_m。固定幅值最优要求 σ≥0 全程
-#       （bang 弧不关机）；若 σ 在某段 <0 则该处应关机（提示可再省燃料）。
-# 协态方程（书 1.49~1.52，速度型协态 p_v，不含质量列）：
-#   ṗ_r = -S p_v,  ṗ_v = -p_r,  p_m=const(=-1)。S=∂grav/∂r。
-# ---------------------------------------------------------------------------
-_C_EXH = ISP * G0 / 1000.0        # 有效喷速 c = Isp·g0，km/s ≈ 3.0667
-
-
-def _primer_costate_rhs(t, lam, rvt):
-    """协态 ODE。lam=[prx,pry,pvx,pvy]；rvt(t) 返回 (r,v,m)（预先求好的参考轨迹）。"""
-    r, v, m = rvt(t)
-    p_r = lam[0:2]; p_v = lam[2:4]
-    rn = max(float(np.linalg.norm(r)), R_MARS)
-    S = 3.0 * MU * np.outer(r, r) / rn ** 5 - MU * np.eye(2) / rn ** 3
-    dpr = -S @ p_v
-    dpv = -p_r
-    return np.concatenate([dpr, dpv])
-
-
-def primer_verify(p=None, rp_target=None, ra_target=None, samples=200):
-    """对固定幅值逆行弧（默认 p=indirect_solve 解）做 primer 最优性校验。
-
-    步骤：用 _final_elems 同构求出 coast→power→coast 的参考状态轨迹；
-    在动力段 [t1,t1+tF] 上取终端协态 p_v(tf) ∝ -v(tf)（横截：逆行终端自由），
-    反向积分协态至开机，再沿轨迹评估 (1) 方向偏差 (2) 切换函数 σ。"""
-    if p is None:
-        p = indirect_solve(rp_target, ra_target)
-    if rp_target is None:
-        rp_target = R_MARS + 600.0
-    if ra_target is None:
-        ra_target = R_MARS + 80000.0
-    rp2, tF = p["rp2"], p["tF"]
-    t1 = p["t1"]
-
-    # 参考状态轨迹：动力段用细网格积分一次，插值供协态积分取 (r,v,m)
-    y = np.concatenate([soi_state(rp=rp2), [M0]])
-    y1, _ = _integrate(y, (0.0, t1), "coast", max_step=2000.0)
-    from scipy.interpolate import interp1d
-    grid = np.linspace(t1, t1 + tF, 400)
-    traj = np.empty((len(grid), 5))
-    ycur = y1.copy(); ti = t1
-    for k, t in enumerate(grid):
-        ys, _ = _integrate(ycur, (ti, t), "retrograde", t_ref=t1, max_step=20.0) \
-            if t > ti else (ycur, None)
-        traj[k] = ys; ycur = ys; ti = t
-    R = interp1d(grid, traj[:, 0:2], axis=0, fill_value="extrapolate")
-    Vv = interp1d(grid, traj[:, 2:4], axis=0, fill_value="extrapolate")
-    Mm = interp1d(grid, traj[:, 4], fill_value="extrapolate")
-
-    def rvt(t):
-        return R(t), Vv(t), float(Mm(t))
-
-    # 终端横截（方向条件）：最优推力 u*=-p_v/|p_v| 应=逆行 -v/|v|，
-    # 故 p_v(tf) 应沿 +v(tf)。尺度任取（线性齐次协态），σ 形状与尺度无关处再谈。
-    vtf = Vv(t1 + tF); p_vtf = vtf / np.linalg.norm(vtf)
-    lam_tf = np.array([0.0, 0.0, p_vtf[0], p_vtf[1]])
-    sol = solve_ivp(_primer_costate_rhs, (t1 + tF, t1), lam_tf,
-                    args=((lambda t: rvt(t),)), method="DOP853",
-                    rtol=1e-8, atol=1e-9, dense_output=True)
-    # 沿轨迹评估：(1) 方向 u*=-p_v/|p_v| vs 逆行 -v/|v|；(2) |p_v| 分布(切换结构)
-    ts = np.linspace(t1, t1 + tF, samples)
-    align = []; pmags = []
-    for t in ts:
-        r, v, m = rvt(t)
-        lv = sol.sol(t)
-        p_v = lv[2:4]; pmag = float(np.linalg.norm(p_v))
-        u_star = -p_v / pmag if pmag > 1e-12 else np.zeros(2)
-        u_retro = -np.asarray(v) / float(np.linalg.norm(v))
-        cosang = float(np.dot(u_star, u_retro))
-        align.append(math.degrees(math.acos(max(-1.0, min(1.0, cosang)))))
-        pmags.append(pmag)
-    align = np.array(align); pmags = np.array(pmags)
-    pk = int(np.argmax(pmags))             # |p_v| 峰值位置→切换函数 σ 最大处
-    return dict(max_align_deg=float(align.max()),
-                mean_align_deg=float(align.mean()),
-                peak_frac=float(pk / (samples - 1)),   # |p_v|峰值在弧上相对位置
-                sigma_end_over_peak=float(pmags[-1] / pmags[pk]),
-                sigma_start_over_peak=float(pmags[0] / pmags[pk]),
-                fuel=p["fuel"], elems=p["elems"])
-
-
-# ---------------------------------------------------------------------------
 # 粒子群优化 PSO（书 §1.5.3）
 # ---------------------------------------------------------------------------
 def pso(objective, bounds, n=40, iters=150, w=0.7, c1=1.5, c2=1.5, seed=1):
@@ -476,27 +375,26 @@ def dispersion_mc(nmc=200, sig_pos_km=1.0, sig_vel_ms=1.0, seed=7):
 def report_closed_form():
     L = []
     L.append("=" * 68)
-    L.append("火星捕获段 §1.5（4.py，火心平面二体，T=490N Isp=312s m0=2350kg）")
+    L.append("火星捕获段 §1.5（火心平面二体，T=490N Isp=312s m0=2350kg）")
     L.append("=" * 68)
     L.append("式1.42：a2=%.4f km  e2=%.6f  θ2=%.4f°" % (A2, E2, math.degrees(THETA2)))
     L.append("表1.11 标称：a=%.4f e=%.6f i=%.4f Ω=%.4f ω=%.4f"
              % (TABLE_1_11["a"], TABLE_1_11["e"], TABLE_1_11["i"],
                 TABLE_1_11["omega_node"], TABLE_1_11["omega_p"]))
-    # SOI 入射校验：积分到近火点应 = RP2
+    # 双曲线入射状态积分到近火点
     y = np.concatenate([soi_state(), [M0]])
     yf, _ = _integrate(y, (0.0, 2e5), "coast", events=_peri_event, max_step=5.0)
     el = two_body_elements(yf[:2], yf[2:4])
     L.append("式1.43 SOI 入射状态 r=[%.1f,%.1f] v=[%.4f,%.4f] km/s"
              % (soi_state()[0], soi_state()[1], soi_state()[2], soi_state()[3]))
-    L.append("  积分至近火点：rp=%.2f km（应≈%.2f）  e=%.4f  →  %s"
-             % (el["rp"], RP2, el["e"], "OK" if abs(el["rp"] - RP2) < 5 else "偏差"))
+    L.append("  积分至近火点：rp=%.2f km  e=%.4f" % (el["rp"], el["e"]))
     cf = closed_form_capture()
     L.append("")
     L.append("[式1.44~1.46 圆捕获 600km]")
-    L.append("  Vp2=%.4f  Vc=%.4f  Δv=%.4f km/s  Δm=%.1f kg（书 2.6082 / 1348）"
+    L.append("  Vp2=%.4f  Vc=%.4f  Δv=%.4f km/s  Δm=%.1f kg"
              % (cf["vp"], cf["vc"], cf["dv_circ"], cf["dm_circ"]))
     L.append("[式1.47~1.48 椭圆捕获 600×100000km]")
-    L.append("  Vp2=%.4f  Ve=%.4f  Δv=%.4f km/s  Δm=%.2f kg（书 1.3392 / 833.04）"
+    L.append("  Vp2=%.4f  Ve=%.4f  Δv=%.4f km/s  Δm=%.2f kg"
              % (cf["vp"], cf["ve"], cf["dv_ell"], cf["dm_ell"]))
     return "\n".join(L)
 
@@ -529,7 +427,6 @@ def main(argv=None) -> int:
     ap.add_argument("--pso", action="store_true", help="跑三种推力模型 PSO")
     ap.add_argument("--indirect", action="store_true", help="§1.5.2 间接法燃料最优")
     ap.add_argument("--mc", action="store_true", help="§1.5.4 初值扰动色散")
-    ap.add_argument("--primer", action="store_true", help="§1.5.2 primer 最优性校验")
     ap.add_argument("--nmc", type=int, default=200, help="蒙特卡洛样本数")
     ap.add_argument("--n", type=int, default=40, help="PSO 粒子数")
     ap.add_argument("--iters", type=int, default=120, help="PSO 迭代数")
@@ -545,24 +442,6 @@ def main(argv=None) -> int:
                   % (r["ok"], r["rp2"], r["t1"], r["tF"], r["fuel"]))
             print("  捕获后 a=%.1f  rp=%.1f  ra=%.1f  e=%.4f"
                   % (e["a"], e["rp"], e["ra"], e["e"]))
-            print("  书 §1.5.2 ≈911.55 kg（本模型逆行中心弧，含重力/转向损失→略高）")
-    if a.primer:
-        print("\n[§1.5.2] primer-vector 最优性校验（式1.49~1.59 协态/横截结构）")
-        if not _HAVE_SCIPY:
-            print("  需要 scipy，当前不可用。")
-        else:
-            v = primer_verify(); e = v["elems"]
-            ok_dir = v["max_align_deg"] < 5.0
-            print("  (1)方向条件 u*=-p_v/|p_v| vs 逆行 -v/|v|："
-                  "最大偏差=%.2f° 均值=%.2f° → %s"
-                  % (v["max_align_deg"], v["mean_align_deg"],
-                     "逆行即 primer 最优制导" if ok_dir else "存在转向损失"))
-            print("  (2)切换结构 |p_v| 峰值位于弧相对 %.2f（近火点≈0.5）；"
-                  "两端 |p_v|/峰值：起=%.3f 末=%.3f"
-                  % (v["peak_frac"], v["sigma_start_over_peak"],
-                     v["sigma_end_over_peak"]))
-            print("  → |p_v| 两端<峰值：σ=c|p_v|/m-1 在弧端<σ_max，"
-                  "若某段 σ<0 则该处应关机（自由关机可再省燃料）。")
     if a.mc:
         d = dispersion_mc(nmc=a.nmc)
         print("\n[§1.5.4] SOI 入射状态 位置±1km/速度±1m/s 正态扰动 → 近火点色散"
@@ -573,14 +452,13 @@ def main(argv=None) -> int:
             print("  %-3s 均值=%12.4f  标准差=%10.4f  %s" % (k, mu_, sd_, unit))
     if a.pso:
         print("\n[§1.5.3] PSO 燃料最优捕获（三推力模型）")
-        for mode, ref in (("retrograde", "书表1.14≈920.68 kg"),
-                          ("inertial", "书表1.13≈979.17 kg"),
-                          ("omega", "书表1.15≈928.86 kg")):
+        for mode in ("retrograde", "inertial", "omega"):
             g, res = run_pso(mode, n=a.n, iters=a.iters)
             e = res["elems"]
-            print("  [%-10s] 燃料=%.1f kg  a=%.1f rp=%.1f e=%.4f  参数=%s  (%s)"
+            print("  %-11s 燃料=%.1f kg  a=%.1f km  rp=%.1f km  e=%.4f"
+                  "  参数=%s"
                   % (mode, res["fuel"], e["a"], e["rp"], e["e"],
-                     np.array2string(np.array(g), precision=1), ref))
+                     np.array2string(np.array(g), precision=1)))
     if not _HAVE_SCIPY:
         print("注：无 scipy，使用定步长 RK4（精度/速度下降）。")
     return 0

@@ -1,43 +1,23 @@
-"""
-文昌发射场 · 当日发射窗口 + 上升段闭合链 + GMAT 状态（单文件）
-===============================================================
+"""文昌发射场 · 当日发射窗口 + 上升段闭合链 + GMAT 初始状态（单文件）
 
-统一约定（写死，不再有歧义）：
-  · 猪排图 time  = 探测器穿出地球影响球(SOI)的时刻 t_SOI（不是发射时刻！）
-  · 猪排图 vinf1 = SOI 处的地心速率 v_SOI（不是无穷远剩余速度）
-    真 V∞ = sqrt(v_SOI² − 2μ/r_SOI)（能量反推）
+约定（写死）：
+  · 猪排图 time  = 探测器穿出地球影响球(SOI)的时刻，不是发射时刻
+  · 猪排图 vinf1 = SOI 处的地心速率 v_SOI；真 V∞ = sqrt(v_SOI² − 2μ/r_SOI)
 
-链路（全部倒推，固定文昌）：
-  (1) 猪排图：指定到达 或 自动扫该列 |V∞| 最小 → v_SOI 与方向 s
-  (2) v_SOI → 真 V∞ → 逃逸双曲线 (e, θ1, ν∞, 停泊周期 T)
-  (3) SOI → 近地点(TMI)：双曲开普勒 → t_TMI
-  (4) 当日窗口（顺行 + 射向走廊）→ 窗内最优 t_opt（i* = max(|δ∞|,φ)）
-  (5) 定时闭合解 tmi_hit：滑行<1圈，出SOI精确=departure
-  (6) ★上升段闭合链：给定上升时长/航程，联立解
-        共面  det[r_s(t_lift), r_ins, s] = 0        → 解地面射向 A0
-        计时  t_ins + coast(入轨→近地点) = t_ign(A1) → 解离台时刻
-      【教训1】离台 ≠ t_opt − 上升时长：downrange 相位使滑行缩短约
-      3.8 min、地球在上升段里转过 ~4.5°——必须解联立，不能做算术减法。
-      【教训2】计时根必落 在 dsec ∈ (−T·60, 0)（0<滑行<T 的物理约束），
-      外层扫描必须用这个区间——扫描窗开错位置会拿到"假闭合解"。
-  (7) GMAT 直填状态：A1(理想·发射钟) / A1c(★全链闭合，仅闭合时打印) /
-      A2(网格钟·对接dihuo2) / B(定时闭合·准点出SOI)
-
-两个时钟：
-  发射钟 A1/A1c：离台→入轨→滑行→点火→出SOI（出SOI偏离departure属正常，
-                 由 dihuo2.py 差分修正吸收；或直接把实际出SOI时刻写进
-                 departure 重新生成格子）
-  网格钟 A2/B  ：t_TMI = departure − Δt(rp→SOI)，出SOI ≡ departure
+链路：猪排图 v_SOI → 逃逸双曲线(e, θ1, ν∞, 停泊周期) → SOI→近地点计时
+      → 当日窗口（顺行 + 射向走廊）→ 定时闭合解 → 上升段闭合链
+      （联立「共面」与「计时」两个条件解射向 A0 与离台时刻）→ GMAT 状态。
+四套钟：A1 最优发射（理想入轨点）、A1c 全链闭合、A2 网格钟、B1 定时闭合。
+A1/A1c 出 SOI 偏离 departure 属正常（发射钟），A2/B1 严格准点（网格钟）。
 
 用法：
-  python dihuo1.py 2020-07-25                     # 自动扫该列|V∞|最小到达
-  python dihuo1.py 2020-07-25 2021-02-11          # 指定到达
-  python dihuo1.py 2020-07-25 2021-02-11 --alt 200 --ascent 18 --downrange 1600
-  python dihuo1.py "2020-07-21 17:59:19" 2021-01-30    # 出发可带时刻(交棒钟)
-  python dihuo1.py --golden 2020-07-15 2020-08-03 --max-coast 30
-       # 扫出发期：只保留 滑行≤max-coast、在主窗口、射向在走廊 的命中解，
-       # 按 gap 排序；选定 D* 后 python dihuo1.py D* 查全链闭合报告
-
+  python step1_发射窗口与上升段闭合.py 2020-07-25 2021-02-11
+  python step1_发射窗口与上升段闭合.py 2020-07-25       # 自动扫该列 |V∞| 最小到达
+  python step1_发射窗口与上升段闭合.py 2020-07-25 2021-02-11 \
+         --alt 200 --ascent 18 --downrange 1600
+  python step1_发射窗口与上升段闭合.py "2020-07-21 17:59:19" 2021-01-30
+  python step1_发射窗口与上升段闭合.py --golden 2020-07-15 2020-08-03 --max-coast 30
+         # 扫出发期找滑行短的命中日，选定后再出一份全链闭合报告
 只依赖 numpy。
 """
 
@@ -668,7 +648,7 @@ def golden_scan(dep_lo: datetime, dep_hi: datetime, alt: float = 200.0,
     扫出发日期区间。判据（k=0 命中解）：
       ① 落进主窗口  ② 射向在走廊内  ③ 滑行 ≤ max_coast（如指定，如 30/20 min）
     按 gap = |t_hit − t_opt| 排序（gap 小 ⇒ 倾角贴 i*）。
-    选定 D* 后务必 python dihuo1.py D* 查全链闭合报告（勿混其他格参数）。
+    选定 D* 后务必再跑一次 step1（python step1_发射窗口与上升段闭合.py D*）看全链闭合报告。
     """
     out = []
     d = dep_lo.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -699,7 +679,7 @@ def golden_scan(dep_lo: datetime, dep_hi: datetime, alt: float = 200.0,
     print("黄金日扫描 · %s ~ %s · 停泊 %d km · 滑行限值 %s"
           % (fmt(dep_lo)[:10], fmt(dep_hi)[:10], alt,
              ("≤%g min" % max_coast) if max_coast else "不设"))
-    print("判据：命中解在主窗口内、射向走廊内、滑行短；gap 越小倾角越贴 i*")
+    print("判据：命中解在主窗口内、射向走廊内、滑行 <1 圈；gap = 距窗内最优的时刻差")
     print("=" * 70)
     for gap, d, arr, h, w in out[:top]:
         print("%s  gap=%6.1f min  i=%.3f° A=%.2f° 滑行 %5.1f min | "
@@ -710,7 +690,7 @@ def golden_scan(dep_lo: datetime, dep_hi: datetime, alt: float = 200.0,
     print("-" * 70)
     print("首选出发日 D* = %s（滑行 %.1f min，i=%.3f°）"
           % (fmt(d)[:10], h.coast_min, h.inc_deg))
-    print("下一步：python dihuo1.py %s   ← 全链闭合报告 + GMAT 状态"
+    print("下一步：python step1_发射窗口与上升段闭合.py %s   ← 全链闭合报告"
           % fmt(d)[:10])
     return out
 
@@ -808,9 +788,8 @@ def report(r) -> str:
     L.append("  departure(SOI)  %s UTC" % fmt(r["departure"]))
     L.append("  arrival(%s) %s UTC" % (
         "自动·该列|V∞|最小" if r["auto"] else "指定", fmt(r["arr"])))
-    L.append("  v_SOI   %.5f km/s （猪排图给的 vinf1，按 SOI 处速率）" % r["v_soi"])
-    L.append("  → 真 V∞ %.5f km/s （能量反推，差 %.5f）"
-             % (r["vinf"], r["v_soi"] - r["vinf"]))
+    L.append("  v_SOI   %.5f km/s（猪排图 vinf1 = SOI 处速率）" % r["v_soi"])
+    L.append("  → 真 V∞ %.5f km/s（能量反推）" % r["vinf"])
     L.append("  |v∞(火星)| %.4f km/s" % r["vmars"])
     L.append("")
     L.append("[双曲线]")
@@ -838,11 +817,7 @@ def report(r) -> str:
             + timedelta(hours=hyp.t_soi_h)
         L.append("  ★ 当日最优时刻 %s UTC（北京 %s）"
                  % (fmt(w.t_opt), fmt_bj(w.t_opt)))
-        if abs(hyp.dec_deg) >= lat:
-            note = "理论最小 i_min = max(|δ∞|,φ)（δ∞>φ 时同时 az 最小）"
-        else:
-            note = "（窗内最小；δ∞<φ 时全局最小点不在走廊内）"
-        L.append("    i* = %.4f°  %s" % (w.i_opt, note))
+        L.append("    i* = %.4f°" % w.i_opt)
         L.append("    A* = %.3f°  滑行 %.2f min" % (w.az_opt, w.coast_opt))
         L.append("    → 实际SOI穿越 %s UTC（北京 %s），距猪排图 departure %+.2f d"
                  % (fmt(t_soi_act), fmt_bj(t_soi_act),
@@ -850,10 +825,7 @@ def report(r) -> str:
     L.append("")
     L.append("[定时闭合解 tmi_hit（顺行，滑行<1圈，出SOI=departure）]")
     if not r["hits"]:
-        L.append("  无")
-        L.append("  [诊断] Δλ(t_TMI) = %+.2f°。k=0 切片要求 Δλ 落入射向走廊"
-                 % r["dl_tmi"])
-        L.append("  对应区间内；本日相位不匹配属正常。")
+        L.append("  无（Δλ(t_TMI) = %+.2f°，不在 k=0 走廊区间）" % r["dl_tmi"])
     for g in r["hits"]:
         inw = any(w.t_open <= g.t_launch <= w.t_close for w in r["wins"])
         gap_min = min(abs((g.t_launch - w.t_opt).total_seconds()) / 60.0
@@ -865,31 +837,25 @@ def report(r) -> str:
         L.append("")
         L.append("[上升段闭合链 ★ 离台→入轨→近地点]"
                  "（上升 %.0f min / 航程 %.0f km）" % (asc["t_a"], asc["D"]))
-        L.append("  联立求解：共面 det[r_s,r_ins,s]=0（解射向）+ "
-                 "计时 t_ins+coast=t_ign（解离台）")
         L.append("  离台   %s UTC（北京 %s）"
                  % (fmt(asc["t_lift"]), fmt_bj(asc["t_lift"])))
         L.append("  射向   A0 = %.3f°（地面航向%s）"
-                 % (asc["A0"],
-                    "，走廊内 ✓" if AZ_LO <= asc["A0"] <= AZ_HI else "！"))
+                 % (asc["A0"], "，走廊内" if AZ_LO <= asc["A0"] <= AZ_HI
+                    else "，走廊外"))
         L.append("  入轨   %g km @ %.2f°N %.2f°E（海上空）"
                  % (r["alt"], asc["lat_ins"], asc["lon_ins"]))
-        L.append("  平面   i = %.4f°（渐近线 s 精确保留）" % asc["i_deg"])
-        L.append("  滑行   入轨→近地点 du=%.2f° → %.2f min（<1圈 ✓）"
+        L.append("  平面   i = %.4f°" % asc["i_deg"])
+        L.append("  滑行   入轨→近地点 du=%.2f° → %.2f min（<1 圈）"
                  % (asc["du"], asc["coast"]))
-        L.append("  残差   共面 %.2e km³ / 计时 %+.2e min"
-                 % (abs(asc["res1"]), asc["res2"]))
-        # 守卫：✓ 只在真闭合时打印
         if asc.get("closed"):
-            L.append("  链条   离台 →(%.0f min)→ 入轨 →(%.2f min)→ 近地点 %s ✓"
+            L.append("  链条   离台 →(%.0f min)→ 入轨 →(%.2f min)→ 近地点 %s"
                      % (asc["t_a"], asc["coast"], fmt(asc["t_anchor"])))
         else:
             t_pg = asc["t_ins"] + timedelta(minutes=asc["coast"])
-            L.append("  链条   实际到近地点 %s，距锚 %s 差 %+.1f min ✗ 未闭合"
+            L.append("  链条   实际到近地点 %s，距锚 %s 差 %+.1f min（未闭合，"
+                     "A1c 已从 GMAT 块剔除）"
                      % (fmt(t_pg), fmt(asc["t_anchor"]), asc["res2"]))
-            L.append("         （A1c 状态已按守卫从 GMAT 块剔除，勿手工挪用）")
-        L.append("  对比   天真回拨(t_opt−t_a)=%s → 自洽解晚 %+.1f min"
-                 "（downrange 相位修正，不能拍脑袋减）"
+        L.append("  对比   直接回拨 t_opt−t_a = %s，自洽解晚 %+.1f min"
                  % (fmt(asc["naive"])[11:], asc["delta_lift_min"]))
     if r["gmat_states"]:
         L.append("")
@@ -906,27 +872,17 @@ def report(r) -> str:
                      % (rv[1], vv[1]))
             L.append("    Z  = %14.4f km     VZ = %12.6f km/s"
                      % (rv[2], vv[2]))
-            L.append("    校验: |r|=%.1f km  |v|=%.4f km/s  r·v=%+.3e"
+            L.append("    |r|=%.1f km  |v|=%.4f km/s"
                      % (float(np.linalg.norm(rv)),
-                        float(np.linalg.norm(vv)),
-                        float(rv @ vv)))
+                        float(np.linalg.norm(vv))))
             t_soi = ep + timedelta(hours=hyp.t_soi_h)
             L.append("    → 出SOI %s UTC（距 departure %+.3f d）"
                      % (fmt(t_soi),
                         (t_soi - r["departure"]).total_seconds() / 86400.0))
-        L.append("  注：① 点火后状态，GMAT 中不要再叠加 TMI 脉冲；")
-        L.append("     ② 初始 200 km 但能量为正，请关闭大气阻力；")
-        L.append("     ③ GMST 直写 J2000 省略岁差（~0.3°），由 dihuo2.py")
-        L.append("        差分修正吸收；")
-        L.append("     ④ A1/A1c=发射钟（出SOI偏离departure属正常，dihuo2")
-        L.append("        初值建议 departure 带实际出SOI时刻，或直接以该时刻")
-        L.append("        作 departure 重新生成本报告）；A2/B=网格钟")
-        L.append("        （出SOI=departure）；")
-        L.append("     ⑤ A1c 为全链闭合状态（离台→入轨→滑行→点火逐项验算，")
-        L.append("        未闭合时自动不打印），与 A1 差 ~0.05° 面转角")
-        L.append("        （km / m·s⁻¹ 级），两者均可作 dihuo2 修正初值；")
-        L.append("        上升段参数以实际运载时序为准（--ascent/--downrange）；")
-        L.append("     ⑥ 定时闭合/准点出SOI 场景请用方案B的状态。")
+        L.append("  注：状态为 TMI 点火后，GMAT 里不要再叠加脉冲；")
+        L.append("      近地点 200 km 但能量为正，需关闭大气阻力。")
+        L.append("      A1/A1c 是发射钟，A2/B1 是网格钟；step2 的 --dep")
+        L.append("      建议填本报告给出的实际出 SOI 时刻。")
     L.append("=" * 70)
     return "\n".join(L)
 

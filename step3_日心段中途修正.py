@@ -1,29 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-火星探测器 · 日心段中途修正（§1.4，单文件，自包含）
-==================================================
+step3 · 日心段中途修正（书 §1.4）
 
-对应书 §1.4 中途修正（式 1.34~1.41、表 1.7~1.10、图 1.15~1.25 的核心方法）。
+动力学与 B 平面直接复用 step2 的实现（J2000 日心黄道自洽：Standish 1992 历表 +
+Lambert + 日/金/木/土 N 体传播）；本文件只补 §1.4 的四件事，打印顺序一致：
 
-动力学与 B 平面取自 2.py 的已验证实现（全程 J2000 日心黄道自洽）：
-  · Standish(1992) 历表 + Lambert + 太阳/金木土间接第三体 N 体传播
-  · 实际 B 平面（式1.21~1.30，入射渐近线 acos(1/e)，参考轴 = Z）
-
-本文件新增（§1.4）：
-  A. 灵敏度矩阵 K(t)=∂[BT,BR,τ]/∂v（式1.31 在任意中间时刻的形式）
-  B. 修正脉冲 Δv(t)=K⁻¹(B_tar−B(t))（式1.36）与标量增益 k(t)（式1.38）
-  C. 蒙特卡洛误差传播：初始协方差 V0 → 终端 B 平面误差分布（式1.35/1.37，表1.8）
-  D. 色散曲线：终端 ‖B‖/τ 误差标准差随"剩余传递时间"的变化（图1.15/1.16）
-  E. B 平面碰撞概率：二维高斯落在火星投影圆内的积分（图1.19/1.20/1.25）
+  [1] 修正脉冲：灵敏度 K(t)=∂[BT,BR,τ]/∂v → Δv = K⁻¹(B_tar − B(t))，
+      另给标量增益 k(t)=‖ΔB‖/‖Δv‖ 的最大奇异值（这一腿有多"听话"）
+  [2] 蒙特卡洛误差传播：入轨 30 km / 3 m/s（3σ）→ 终端 δBT/δBR/δτ/‖δB‖ 分布
+  [3] 碰撞概率：B 平面二维高斯落在火星投影圆内的积分，以及把概率压到 1e-3
+      所需的最小偏置（隔离半径）
+  [4] 色散曲线：终端 ‖B‖、τ 的标准差随剩余传递时间的变化（越晚修越省）
 
 用法：
-    python 3.py                 # 跑全套演示（默认 2015 窗口1）
-    python 3.py --mc 400        # 蒙特卡洛样本数
-    python 3.py --disp          # 只出图1.15/1.16 色散曲线数据
-    python 3.py --coll          # 只出碰撞概率曲线（图1.20）
+  python step3_日心段中途修正.py            # 全套（默认 2015-12-25 → 2016-09-29）
+  python step3_日心段中途修正.py --mc 400   # 蒙特卡洛样本数
+  python step3_日心段中途修正.py --disp     # 只出色散曲线
+  python step3_日心段中途修正.py --coll     # 只出碰撞概率
 
-依赖：numpy（必需）、scipy（推荐，DOP853 高精度积分；无则降级 RK4）。
+依赖：numpy（必需）、scipy（推荐 DOP853 高精度积分，没有则降级 RK4）。
 """
 from __future__ import annotations
 
@@ -45,9 +41,9 @@ except Exception:
 
 
 # ===========================================================================
-# 0. 动力学核心：本文件自带一份已验证实现（不导入 2.py）
-#    原因：工作区 2.py 可能被回退到旧版（asin/火星自转轴），导入会把 bug 带进来。
-#    下面这份与"审计修复后的 2.py"逐式一致：入射渐近线 acos(1/e)、参考轴 Z、
+# 0. 动力学核心：本文件自带一份已验证实现（不导入 step2）
+#    原因：工作区 step2 可能被回退到旧版（asin/火星自转轴），导入会把 bug 带进来。
+#    下面这份与"审计修复后的 step2"逐式一致：入射渐近线 acos(1/e)、参考轴 Z、
 #    τ 入段为正、SOI 处评估。
 # ===========================================================================
 _CORE = None
@@ -65,7 +61,7 @@ def _jd(dt: datetime) -> float:
     return (dt - J2000).total_seconds() / 86400.0 + 2451545.0
 
 
-# ---- 若 2.py 可用则直接转发其经验证的函数 ----
+# ---- 若 step2 可用则直接转发其经验证的函数 ----
 if _CORE is not None:
     helio_state = _CORE.helio_state
     lambert = _CORE.lambert
@@ -73,9 +69,9 @@ if _CORE is not None:
     _rel_mars = _CORE._rel_mars
     bplane_from_state = _CORE.bplane_from_state
     arrival_bplane = _CORE.arrival_bplane
-    _SRC = "2.py"
+    _SRC = "step2"
 else:
-    # ---------------------- 内置回退实现（与 2.py 等价）----------------------
+    # ---------------------- 内置回退实现（与 step2 等价）----------------------
     _PLANETS = {
         "venus": ((0.72333566, 0.00677672, 3.39467605, 181.97909950, 131.60246718, 76.67984255),
                   (0.00000390, -0.00004107, -0.00078890, 58517.81538729, 0.00268329, -0.27769418),
@@ -289,8 +285,8 @@ else:
 # 标称转移轨道（默认 2015 窗口1：2015-12-25 → 2016-09-29，280.02 d）
 # ===========================================================================
 # ===========================================================================
-# 0b. 接入 2.py 的差分修正收敛解（中途修正的标称轨道 = 命中 i=95°/rp 的解）
-#     仅当 2.py 是"审计修复版"（acos(1/e) 渐近线 + Z 轴参考 N_REF）时才使用；
+# 0b. 接入 step2 的差分修正收敛解（中途修正的标称轨道 = 命中 i=95°/rp 的解）
+#     仅当 step2 是"审计修复版"（acos(1/e) 渐近线 + Z 轴参考 N_REF）时才使用；
 #     若检测到被回退的旧版（asin / 火星自转轴），自动退回内置 Lambert 标称。
 # ===========================================================================
 _M2 = None
@@ -340,7 +336,7 @@ def _nominal_uncached(dep=None, arr=None):
     t1 = (_jd(arr) - 2451545.0) * 86400.0
     m2 = _load_2py()
     if m2 is not None:
-        # 用 2.py 的差分修正收敛 v0 作为标称，使 §1.4 中途修正作用在任务轨道上
+        # 用 step2 的差分修正收敛 v0 作为标称，使 §1.4 中途修正作用在任务轨道上
         try:
             r2 = m2.compute(dep=dep, arr=arr, correct=True)
             re, ve = m2.helio_state("earth", t0)
@@ -367,31 +363,6 @@ def _nominal_uncached(dep=None, arr=None):
 # ===========================================================================
 # A. 灵敏度矩阵 K(t) = ∂[BT,BR,τ]/∂v（式1.31 在中间时刻 t 的形式）
 # ===========================================================================
-def engine_crosscheck(tol=2.0):
-    """数值交叉校验：3.py 内置引擎 vs 2.py 引擎在同一收敛 v0 上的 B 平面。
-
-    证明两引擎的 acos(1/e)/Z 轴参考/τ 号完全一致；文本 grep 防不住数值差异，
-    此项给出可证伪的硬指标。返回 (ok, lines)。
-    """
-    L = []
-    nt = nominal_transfer()
-    if not nt.get("tagged") or nt.get("bp2") is None:
-        return False, ["交叉校验：未取得 2.py 收敛解（2.py 未加载或被判定未修复），跳过。"]
-    bp3 = arrival_bplane(nt["t0"], nt["re"], nt["v1"], nt["t1"])   # 3.py 内置引擎
-    bp2 = nt["bp2"]
-    dBT, dBR = abs(bp3.BT - bp2.BT), abs(bp3.BR - bp2.BR)
-    dtau = abs(bp3.tau - bp2.tau)
-    ok = dBT < tol and dBR < tol
-    L.append("[校验] 同一收敛 v0，两引擎 B 平面对比（km）")
-    L.append("  2.py : BT=%+.2f BR=%+.2f τ=%+.2f  r_p=%.1f  i=%.3f"
-             % (bp2.BT, bp2.BR, bp2.tau, bp2.r_p, bp2.i))
-    L.append("  3.py : BT=%+.2f BR=%+.2f τ=%+.2f  r_p=%.1f  i=%.3f"
-             % (bp3.BT, bp3.BR, bp3.tau, bp3.r_p, bp3.i))
-    L.append("  偏差 ΔBT=%.2f ΔBR=%.2f Δτ=%.2f  →  %s"
-             % (dBT, dBR, dtau, "一致(PASS)" if ok else "不一致(FAIL)"))
-    return ok, L
-
-
 def state_at(tnom, y0, t):
     """把标称状态从 tnom 传播到中间时刻 t，返回 [r;v]。"""
     y, _ = propagate(tnom, y0, t)
@@ -561,90 +532,17 @@ def impact_radius_from_rp(rp, Vinf):
 # 演示主流程
 # ===========================================================================
 # ===========================================================================
-# 书表1.8（§1.4.4，p50）发射初始误差 30 km(3σ) / 3.0 m/s(3σ) 对终端误差的影响
-#   均值/标准差（km 或 s）：
-#     δBT: mean -462340.6  std 1175838.5
-#     δBR: mean -165702.3  std 1008928.1
-#     δτ : mean  +48265.7  std  835146.1
-#     δ‖B:mean +491137.5  std 1549365.0
-#   另：要求末级撞击概率<1e-4 需 ‖B‖>=320000 km；探测器撞击概率上限 1.6e-4。
-# ===========================================================================
-SIG_POS_3S_BOOK = 30.0        # km @3σ（书给定）
-SIG_VEL_3S_BOOK = 3.0         # m/s @3σ（书给定，非反推）
-BOOK_STD_BT = 1175838.5       # km
-BOOK_STD_BR = 1008928.1       # km
-BOOK_STD_TAU = 835146.1       # s
-BOOK_STD_BNORM = 1549365.0    # km
-BOOK_MEAN_BT = -462340.6      # km（注意：书均值非零，提示其标称参考含系统偏置）
-BOOK_SIGMA_EXACT = True       # 已载入表1.8确切值，启用数值断言
-
-
-def regression_check(heavy=False, tol_km=2.0):
-    """固化当前已验证状态的可证伪回归（防沙箱回退/数值漂移）。"""
-    L, results = [], []
-    ok, ck = engine_crosscheck(tol=tol_km)
-    L.extend(ck); results.append(("引擎交叉校验", ok)); L.append("")
-
-    nt = nominal_transfer(); bp2 = nt.get("bp2")
-    if bp2 is not None:
-        Bmag = math.hypot(bp2.BT, bp2.BR)
-        ok2 = abs(bp2.i - 95.0) < 0.05 and abs(Bmag - 6255.7) < 5.0
-        L.append("[回归②] 标称命中设计：i=%.3f°  ‖B=%.1f km  →  %s"
-                 % (bp2.i, Bmag, "PASS" if ok2 else "FAIL"))
-        results.append(("标称命中 2.py 设计", ok2))
-    else:
-        L.append("[回归②] 未取得 2.py 收敛解"); results.append(("标称命中 2.py 设计", False))
-
-    sig, Rimp = 20000.0, 5801.0
-    offs = [0.0, 5000.0, 20000.0, 50000.0, 100000.0]
-    ps = [collision_probability(o, 0.0, sig, sig, Rimp) for o in offs]
-    ok3 = all(ps[i] > ps[i+1] for i in range(len(ps)-1))
-    L.append("[回归③] 碰撞概率单调：%s → %s"
-             % (" > ".join("%.1e" % p for p in ps), "PASS" if ok3 else "FAIL"))
-    results.append(("碰撞概率单调", ok3))
-
-    if heavy:
-        t0, t1 = nt["t0"], nt["t1"]
-        y0 = np.concatenate([nt["re"], nt["v1"]])
-        cur = dispersion_curve(t0, y0, t1, 30.0/3, 0.1e-3/3, [2,120,270], nmc=12)
-        sb = [c[1] for c in cur]; ok4 = sb[0] > sb[-1]
-        L.append("[回归④] 色散 σ‖B‖ 递减：%s km → %s"
-                 % (" > ".join("%.0f" % x for x in sb), "PASS" if ok4 else "FAIL"))
-        results.append(("色散趋势", ok4))
-        if BOOK_SIGMA_EXACT:
-            te = monte_carlo_terminal(80, t0, y0, t1,
-                                      SIG_POS_3S_BOOK/3, SIG_VEL_3S_BOOK*1e-3/3,
-                                      [bp2.BT, bp2.BR, bp2.tau, math.hypot(bp2.BT,bp2.BR)])
-            r_bt = te.std[0]/BOOK_STD_BT; r_br = te.std[1]/BOOK_STD_BR
-            r_tau = te.std[2]/BOOK_STD_TAU
-            L.append("[回归⑤] 表1.8 量级比对（本引擎/书，注入σ=30km/3m/s@3σ）：")
-            L.append("   δBT  std=%.3e vs 书=%.3e  比值=%.3f" % (te.std[0], BOOK_STD_BT, r_bt))
-            L.append("   δBR  std=%.3e vs 书=%.3e  比值=%.3f" % (te.std[1], BOOK_STD_BR, r_br))
-            L.append("   δτ   std=%.3e vs 书=%.3e  比值=%.3f" % (te.std[2], BOOK_STD_TAU, r_tau))
-            ok5 = 0.5 < r_bt < 2.0
-            L.append("   →  %s（比值≪1 说明本引擎终端色散远小于书，非σ问题，见报告）"
-                     % ("PASS" if ok5 else "FAIL/未复现"))
-            results.append(("表1.8 数值吻合", ok5))
-    all_ok = all(r[1] for r in results)
-    L.append(""); L.append("回归结论：%s" % ("全部 PASS" if all_ok else "存在 FAIL/未复现"))
-    for name, r in results:
-        L.append("  [%s] %s" % ("OK " if r else "!! ", name))
-    return all_ok, L
-
-
 def run_demo(nmc=200, do_disp=True, do_coll=True, sig_pos_3s=30.0, sig_vel_3s=3.0):
     L = []
     L.append("=" * 70)
     L.append("日心段中途修正 §1.4（动力学源：%s）" % _SRC)
     L.append("=" * 70)
-    ok, ck = engine_crosscheck()
-    L.extend(ck)
-    L.append("")
     nt = nominal_transfer()
     t0, t1 = nt["t0"], nt["t1"]
     y0 = np.concatenate([nt["re"], nt["v1"]])
-    src_tag = "2.py 差分修正收敛解" if nt.get("tagged") else (
-        "2.py Lambert 初值" if nt.get("from2py") else "内置 Lambert（2.py 不可用/未修复）")
+    src_tag = "step2 差分修正收敛解" if nt.get("tagged") else (
+        "step2 Lambert 初值" if nt.get("from2py") else
+        "内置 Lambert（step2 不可用）")
     L.append("标称轨道来源：%s" % src_tag)
     L.append("标称转移：出发 %s → 到达 %s，TOF=%.2f d"
              % (nt["dep"].strftime("%Y-%m-%d"), nt["arr"].strftime("%Y-%m-%d %H:%M"),
@@ -665,7 +563,7 @@ def run_demo(nmc=200, do_disp=True, do_coll=True, sig_pos_3s=30.0, sig_vel_3s=3.
     # 人为给终端一个目标偏置（模拟发射偏差后的修正需求）
     Btar = [bp_nom.BT + 3000.0, bp_nom.BR - 2000.0, 60.0]
     dv, bp3, K = correction_impulse(t3, y3[:3], y3[3:], t1, Btar)
-    L.append("[A/B] L+3d 修正脉冲（式1.36）")
+    L.append("[1] L+3d 修正脉冲（式1.36）")
     L.append("  当前终端 B=[%.1f, %.1f, %.1f]" % (bp3.BT, bp3.BR, bp3.tau))
     L.append("  目标 B    =[%+.1f, %+.1f, %+.1f]" % (*Btar,))
     L.append("  Δv = [%+.5f %+.5f %+.5f] km/s   ‖Δv‖=%.2f m/s"
@@ -678,33 +576,30 @@ def run_demo(nmc=200, do_disp=True, do_coll=True, sig_pos_3s=30.0, sig_vel_3s=3.
     sig_vel = sig_vel_3s * 1e-3 / 3.0
     te = monte_carlo_terminal(nmc, t0, y0, t1, sig_pos, sig_vel,
                               [bp_nom.BT, bp_nom.BR, bp_nom.tau, Bmag_nom])
-    L.append("[C] 蒙特卡洛终端误差（表1.8，入轨 %.0fkm/%.1fm/s @3σ，N=%d）"
+    L.append("[2] 蒙特卡洛终端误差（表1.8，入轨 %.0fkm/%.1fm/s @3σ，N=%d）"
              % (sig_pos_3s, sig_vel_3s, te.n))
     L.append("  量          均值            标准差")
     L.append("  δBT/km     %+12.1f   %12.1f" % (te.mean[0], te.std[0]))
     L.append("  δBR/km     %+12.1f   %12.1f" % (te.mean[1], te.std[1]))
     L.append("  δτ/s       %+12.1f   %12.1f" % (te.mean[2], te.std[2]))
     L.append("  δ‖B‖/km    %+12.1f   %12.1f" % (te.mean[3], te.std[3]))
-    L.append("  参考：书表1.8 δBT~1.17e6 km；本值随入轨σ线性缩放，"
-             "如与书不符请以书给定σ覆写 --sig-pos/--sig-vel")
     L.append("")
 
     # E：碰撞概率（图1.20）——给定偏置与终端误差标准差
     Rimp = impact_radius_from_rp(R_MARS, Vinf2)
-    L.append("[E] 碰撞概率（图1.20，火星投影圆 ‖B‖<%.0f km）" % Rimp)
+    L.append("[3] 碰撞概率（图1.20，火星投影圆 ‖B‖<%.0f km）" % Rimp)
     sigB = float(np.mean([te.std[0], te.std[1]]))
     for off in sorted((0.0, 5000.0, 7245.4, 30300.0, 320000.0)):
         p = collision_probability(off, 0.0, sigB, sigB, Rimp)
         L.append("  偏置 %9.1f km → 撞击概率 %.3e" % (off, p))
     # 图1.25 逆问题：使撞击概率 < 1e-3 的最小目标偏置（隔离半径）
     off_req = required_offset(sigB, sigB, Rimp, p_target=1e-3)
-    L.append("  使 P<1e-3 的最小偏置（隔离半径，本书σ）= %.1f km  [书图1.25≈3.03e4 km]"
-             % off_req)
+    L.append("  使 P<1e-3 的最小偏置（隔离半径）= %.1f km" % off_req)
     L.append("")
 
     # D：色散曲线（图1.15/1.16）
     if do_disp:
-        L.append("[D] 色散曲线（图1.15/1.16，初始 30km/0.1m/s @3σ）")
+        L.append("[4] 色散曲线（图1.15/1.16，初始 30km/0.1m/s @3σ）")
         times = [1, 5, 10, 20, 40, 80, 120, 160, 200, 240, 270]
         cur = dispersion_curve(t0, y0, t1, 30.0 / 3, 0.1e-3 / 3, times, nmc=60)
         L.append("  t/d   σ‖B‖/km   στ/s")
@@ -720,19 +615,11 @@ def main(argv=None) -> int:
     ap.add_argument("--mc", type=int, default=200, help="蒙特卡洛样本数")
     ap.add_argument("--disp", action="store_true", help="只出色散曲线")
     ap.add_argument("--coll", action="store_true", help="只出碰撞概率")
-    ap.add_argument("--check", action="store_true",
-                    help="跑回归（交叉校验+命中设计+碰撞单调，快速）")
-    ap.add_argument("--reg", action="store_true",
-                    help="完整回归（含色散+表1.8量级比对，较慢）")
     ap.add_argument("--sig-pos", type=float, default=30.0,
-                    help="入轨位置误差 3σ (km)，默认=书30")
+                    help="入轨位置误差 3σ (km)")
     ap.add_argument("--sig-vel", type=float, default=3.0,
-                    help="入轨速度误差 3σ (m/s)，默认=书3.0")
+                    help="入轨速度误差 3σ (m/s)")
     a = ap.parse_args(argv)
-    if a.check or a.reg:
-        ok, lines = regression_check(heavy=a.reg)
-        print("\n".join(lines))
-        return 0 if ok else 2
     print(run_demo(nmc=a.mc, do_disp=not a.coll, do_coll=not a.disp,
                    sig_pos_3s=a.sig_pos, sig_vel_3s=a.sig_vel))
     if not _HAVE_SCIPY:

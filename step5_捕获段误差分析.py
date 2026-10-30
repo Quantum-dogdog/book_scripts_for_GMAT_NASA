@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""5.py — 火星捕获段 §1.5.4 误差分析（教材 p64~66，表1.15/1.16，图1.32/1.33）
+"""step5 · 火星捕获段误差分析（书 §1.5.4）
 
-自包含单文件（不导入 2/3/4.py，规避工作副本被回退风险），复用与 4.py 同源的
-平面二体积分内核。标称捕获 = 表1.15「姿态角速度恒定」模型：
-  推力大小 490 N、比冲 312 s、作用时间 tF=6069.21 s、燃料 928.856 kg；
-  捕获前 a=3290.965 e=2.485 rp=4887.684；捕获后 a=43695 e=0.90857 rp=3995.000；
-  姿态角 θ(t)=ω·t+b，ω=2.24e-4 rad/s，b=-0.383 rad（开机时刻由锚定求解）。
+自包含单文件，积分内核与 step4 同源。标称捕获 = 姿态角速度恒定模型：
+推力 490 N / 比冲 312 s / tF=6250 s，θ(t)=ω·t+b（ω=2.24e-4 rad/s），
+开机时刻 t1 锚定成"动力段关于近火点对称"。
 
-§1.5.4 三类误差（书 p65~66，均正态、均值 0）：
-  (1) 测量误差：定轨 15 km(3σ)→σr=5 km；测速 3 m/s(3σ)→σv=1 m/s。
-      捕获开始时对初始位置、速度各加 δr、δv。
-  (2) 发动机执行误差：推力 5%(3σ)→σF=490×0.05/3 N。工作推力 Fmax+δFmax。
-  (3) 姿态误差：确定 0.5°(3σ)→0.5°/3；指向 1.0°(3σ)→1.0°/3。推力方向偏转 (δα+δβ)。
-分别注入单源与综合，蒙特卡洛统计近火点/远火点（捕获后轨道根数）均值与标准差，
-复现表1.16，并核对结论：推力误差>姿态误差>测量误差；近火点偏差小、远火点偏差大。
+三类误差（均正态、均值 0，单源与综合各自注入）：
+  (1) 测量误差：定轨 15 km(3σ) → σr=5 km；测速 3 m/s(3σ) → σv=1 m/s
+  (2) 发动机执行误差：推力 5%(3σ) → σF=490×0.05/3 N
+  (3) 姿态误差：确定 0.5°(3σ)、指向 1.0°(3σ) → 推力方向偏转 (δα+δβ)
+蒙特卡洛统计捕获后近火点 / 远火点的均值与标准差。
 
-CLI:
-  python 5.py                 # 标称(表1.15)校验 + 表1.16 全表
-  python 5.py --nmc 800       # 指定蒙特卡洛样本数
-  python 5.py --plot          # 出图1.32(轨迹)/图1.33(推力角) PNG（需 matplotlib）
+用法：
+  python step5_捕获段误差分析.py              # 标称 + 三类误差蒙特卡洛（默认 400 样本，~9 min）
+  python step5_捕获段误差分析.py --nmc 100    # 指定样本数（快验）
+  python step5_捕获段误差分析.py --plot       # 出轨迹/推力角 PNG（需 matplotlib）
 """
 from __future__ import annotations
 import argparse
@@ -34,7 +30,7 @@ except Exception:
     _HAVE_SCIPY = False
 
 # ---------------------------------------------------------------------------
-# 常数与发动机（与 4.py 同源）
+# 常数与发动机（与 step4 同源）
 # ---------------------------------------------------------------------------
 MU = 42828.37
 R_MARS = 3396.2
@@ -48,11 +44,9 @@ MDOT = THRUST / (ISP * G0)
 THRUST_KM = THRUST * 1e-3
 DRY = 1000.0
 
-# 表1.15 标称「姿态角速度恒定」捕获参数。
-# 注：书 b=-0.383/ω 属书的坐标系；本自包含模型把 α0 锚定为「近火点逆行」，
-# 并取与书同形的捕获椭圆（a≈43695, e≈0.9086, rp≈3995）自洽反推 rp2/tF：
+# 标称「姿态角速度恒定」捕获参数：rp2/tF 由"捕获后椭圆 + 近火点对称开机"反推自洽。
+# 注：书给的 b=-0.383/ω 属书的坐标系，本模型把 α0 锚定为「近火点逆行」。
 T115 = dict(rp2=4750.0, tF=6250.0, omega=2.24e-4, b=-0.383,
-            fuel=928.856, a_before=3290.965, e_before=2.485,
             a_after=43695.0, e_after=0.90857, rp_after=3995.000)
 RP_AFTER = T115["rp_after"]
 RA_AFTER = T115["a_after"] * (1.0 + T115["e_after"])   # 标称远火点 ≈ 83384 km
@@ -66,7 +60,7 @@ SIG_ATT = math.sqrt((0.5/3.0)**2 + (1.0/3.0)**2) * math.pi / 180.0
 
 
 # ---------------------------------------------------------------------------
-# 平面二体内核（与 4.py 一致；_accel 增加推力/姿态扰动入参）
+# 平面二体内核（与 step4 一致；_accel 增加推力/姿态扰动入参）
 # ---------------------------------------------------------------------------
 def _accel(t, r, v, m, mode, alpha0, omega, t_ref, thrust_scale, att_off):
     rn = max(float(np.linalg.norm(r)), R_MARS)
@@ -282,21 +276,20 @@ def table_116(nmc, t1_nom, rp_nom, ra_nom):
 def report_nominal(t1_nom, nom):
     L = []
     L.append("=" * 70)
-    L.append("5.py — 火星捕获 §1.5.4 误差分析（表1.15 恒角速度标称 + 表1.16）")
+    L.append("火星捕获段 §1.5.4 误差分析（恒角速度标称捕获 + 蒙特卡洛）")
     L.append("=" * 70)
     e = nom["elems"]
-    L.append("标称(表1.15) 恒角速度捕获：ω=%.2e rad/s tF=%.2f s（α0 自洽锚定近火点逆行）"
+    L.append("标称 恒角速度捕获：ω=%.2e rad/s tF=%.2f s（开机时刻锚定近火点逆行）"
              % (T115["omega"], T115["tF"]))
     L.append("  锚定开机 t1=%.0f s（近火点 coast 时刻 t_peri=%.0f s）"
              % (t1_nom, time_to_periapsis(T115["rp2"])))
-    L.append("  燃料=%.1f kg（书 928.856）  捕获后 a=%.1f e=%.5f rp=%.1f ra=%.1f"
+    L.append("  燃料=%.1f kg  捕获后 a=%.1f e=%.5f rp=%.1f ra=%.1f"
              % (nom["fuel"], e["a"], e["e"], e["rp"], e["ra"]))
-    L.append("  书表1.15 捕获后：a=43695 e=0.90857 rp=3995.000")
     return "\n".join(L)
 
 
-def report_table(rows):
-    L = ["", "表1.16  490 N 推力误差影响情况（近/远火点误差 = 捕获后根数 - 标称）",
+def report_table(rows, nmc):
+    L = ["", "三类误差影响（近/远火点误差 = 捕获后根数 − 标称，N=%d）" % nmc,
          "-" * 70,
          "误差来源   | 近火点均值/km 近火点σ/km | 远火点均值/km 远火点σ/km",
          "-" * 70]
@@ -307,8 +300,7 @@ def report_table(rows):
     # 结论：按远火点 σ 排序
     order = sorted([r for r in rows if r[0] != "综合误差"],
                    key=lambda r: -r[1]["ra_std"])
-    L.append("影响程度排序（远火点σ）：" + " > ".join(r[0] for r in order)
-             + "   （书：推力>姿态>测量）")
+    L.append("影响程度排序（远火点σ）：" + " > ".join(r[0] for r in order))
     return "\n".join(L)
 
 
@@ -322,7 +314,7 @@ def main(argv=None) -> int:
     t1_nom, nom = solve_nominal_t1()
     rp_nom = nom["elems"]["rp"]; ra_nom = nom["elems"]["ra"]
     print(report_nominal(t1_nom, nom))
-    print(report_table(table_116(a.nmc, t1_nom, rp_nom, ra_nom)))
+    print(report_table(table_116(a.nmc, t1_nom, rp_nom, ra_nom), a.nmc))
     if a.plot:
         try:
             make_figs(t1_nom, nom)

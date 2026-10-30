@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""emej_export.py -- pykep MGA-1DSM 优化 + 导出 6.py 的 nodes.json
+"""step7 · pykep MGA-1DSM 借力优化 → 导出 nodes.json 给 step6
 
-支持两个算例（--case）：
+算例（--case）：
     emej  : 地->火->地->木（默认，2024 窗口）
     eveej : Galileo 地->金->地->地->木（1989 窗口，4 段 3 借力）
 
-直接跑本文件即可（等价于你原来的 emej_sade.py），最后多出 nodes.json：
-
-    python 6.py --nodes emej_nodes.json --csv emej.csv
-
-注意 pykep 内部是 SI（m, m/s, m^3/s^2），写出去的 JSON 一律换成 km / km/s / MJD。
+输出 nodes.json（km / km/s / MJD；pykep 内部是 SI，这里统一换算），step6 直接吃：
+    python step6_引力辅助修正与EMEJ桥接.py --nodes emej_nodes.json --csv emej.csv
 
 常用参数：
     --case eveej        换 Galileo VEEGA 算例
     --x "1.2,0.3,..."   直接用已知冠军染色体，跳过优化
-    --xfile x.json      从 JSON 读冠军染色体（step7 自己会写 <out>_x.json）
+    --xfile x.json      从 JSON 读冠军染色体（本文件会写 <out>_x.json）
     --seed 42           固定 DE 随机种子（默认不固定，每次结果不同）
+    --gen/--islands/--pop   进化代数 / 岛数 / 每种群规模
     --out a.json        输出文件名
     --no-plot           不弹图
+    --selfcheck         额外打印一行：把导出的 DSM 跟 pykep 内部值对一遍
+
+为什么要 --selfcheck：
+    本文件在 pykep 之外自己写了一套解码（export_nodes）。两套实现只要有一处
+    下标错位，输出的 nodes.json 就悄悄错了，而它照样能画出像样的轨迹。让 pykep
+    重算一遍、逐段比大小，就是给这层错位兜底；不一致直接 FAIL 非零退出。
 """
 import argparse
 import json
@@ -43,7 +47,7 @@ MJD_REF = 51544.0          # pykep: epoch(0) = 2000-01-01T00:00 -> 真 MJD 51544
 
 
 def _body_name(pl):
-    """'mars(jpl_lp)' / 'Mars' -> 'mars'（给 6.py 认名字）"""
+    """'mars(jpl_lp)' / 'Mars' -> 'mars'（给 step6 认名字）"""
     return str(pl.name).split("(")[0].strip().lower()
 
 
@@ -196,20 +200,33 @@ def _build_udp(case="emej"):
     return seq, udp
 
 
-def _check_against_udp(udp, x, nodes):
-    """用 pykep 自己的 _compute_dvs 复核导出值（DV[0] 含出发 vinf）。"""
+def _selfcheck(udp, x, nodes, tol_mps=1e-3):
+    """--selfcheck：拿 pykep 自己的 _compute_dvs 复核 export_nodes 的输出。
+
+    pykep 的 dv[0] 把出发 |v∞| 和第一段 DSM 记在一起，所以要比 DSM 得先减掉 x[3]；
+    末位 dv 就是到达 |v∞|。
+    """
     try:
-        dv, _lam, T, _bl, _be = udp._compute_dvs(x)
+        dv, _lam, _T, _bl, _be = udp._compute_dvs(x)
     except Exception as exc:                       # noqa: BLE001
-        print("[warn] 无法调用 _compute_dvs 复核：%s" % exc)
-        return
-    ref_dsm = [dv[0] - float(x[3])] + list(dv[1:-1])
-    arr = nodes["meta"]["dsm_mag_m_s"]
-    err = max(abs(a - b) for a, b in zip(arr, ref_dsm)) if ref_dsm else 0.0
-    print("pykep 自带 DSM  m/s:", ["%.4f" % v for v in ref_dsm])
-    print("导出    DSM  m/s:", ["%.4f" % v for v in arr])
-    print("最大偏差 %.3e m/s；到达 vinf %.4f / %.4f m/s"
-          % (err, nodes["meta"]["vinf_arr_m_s"], dv[-1]))
+        print("[selfcheck] 跳过：pykep _compute_dvs 调不通（%s）" % exc)
+        return True
+    ref = [float(dv[0]) - float(x[3])] + [float(v) for v in dv[1:-1]]
+    got = [float(v) for v in nodes["meta"]["dsm_mag_m_s"]]
+    if len(ref) != len(got):
+        print("[selfcheck] FAIL：DSM 段数不一致，导出 %d 段 / pykep %d 段"
+              % (len(got), len(ref)))
+        return False
+    err_dsm = max(abs(a - b) for a, b in zip(got, ref))
+    v_arr = float(nodes["meta"]["vinf_arr_m_s"])
+    err_arr = abs(v_arr - float(dv[-1]))
+    ok = err_dsm <= tol_mps and err_arr <= tol_mps
+    print("[selfcheck] DSM 最大偏差 %.1e m/s，到达 |v∞| 差 %.1e m/s -> %s"
+          % (err_dsm, err_arr, "PASS" if ok else "FAIL"))
+    if not ok:
+        print("           pykep：%s" % " ".join("%.3f" % v for v in ref))
+        print("           导出 ：%s" % " ".join("%.3f" % v for v in got))
+    return ok
 
 
 def run(argv=None):
@@ -224,6 +241,8 @@ def run(argv=None):
     ap.add_argument("--islands", type=int, default=10)
     ap.add_argument("--pop", type=int, default=20)
     ap.add_argument("--no-plot", action="store_true")
+    ap.add_argument("--selfcheck", action="store_true",
+                    help="用 pykep 内部 _compute_dvs 复核导出的 DSM / 到达 |v∞|，不一致则非零退出")
     a = ap.parse_args(argv)
 
     seq, udp = _build_udp(a.case)
@@ -240,36 +259,60 @@ def run(argv=None):
             kw["seed"] = a.seed
         archi = pg.archipelago(algo=pg.sade(**kw), prob=udp,
                                n=a.islands, pop_size=a.pop)
-        print("Running SADE on %d islands ..." % a.islands)
+        print("SADE 优化：%d 岛 × %d 种群 × 10 轮 evolve ..." % (a.islands, a.pop))
         archi.evolve(10)
         archi.wait()
         fs = [float(np.ravel(v)[0]) for v in archi.get_champions_f()]
         idx = int(np.argmin(fs))
         x = [float(q) for q in archi.get_champions_x()[idx]]
-        print("Done!! Solutions found are: ", fs)
+        print("完成，冠军 J = %.4f km/s" % (fs[idx] / 1e3))
 
-    udp.pretty(x)
     if not a.no_plot:
         try:
             udp.plot(x)
         except Exception as exc:                   # noqa: BLE001
             print("[warn] plot 跳过：%s" % exc)
 
-    print("\nX =", repr(list(x)))
     with open(os.path.splitext(a.out)[0] + "_x.json", "w", encoding="utf-8") as fh:
         json.dump(dict(x=list(x)), fh, indent=1)
 
     nodes, path = export_nodes(seq, x, a.out)
-    print("\n--- 导出校验 ---")
-    _check_against_udp(udp, x, nodes)
-    print("节点历元 MJD :", ["%.6f" % e for e in
-                             [nodes["departure"]["epoch_mjd"]]
-                             + [f["epoch_mjd"] for f in nodes["flybys"]]
-                             + [nodes["arrival"]["epoch_mjd"]]])
-    print("飞越 rp km  :", ["%.1f" % f["rp_km"] for f in nodes["flybys"]])
-    print("nodes -> %s" % path)
-    print(json.dumps(nodes, ensure_ascii=False))
+    m = nodes["meta"]
+    eps = ([nodes["departure"]["epoch_mjd"]]
+           + [f["epoch_mjd"] for f in nodes["flybys"]]
+           + [nodes["arrival"]["epoch_mjd"]])
+    vd = float(np.linalg.norm(nodes["departure"]["vinf_km_s"]))
+    print("")
+    print("节点历元（MJD）：%s" % " -> ".join("%.4f" % e for e in eps))
+    print("段飞行时间（d）：%s" % " / ".join(
+        "%.2f" % q for q in m.get("tof_days", list(np.diff(eps)))))
+    print("出发 |v∞| = %.3f km/s（C3 = %.3f km²/s²）；到达 |v∞| = %.3f km/s"
+          % (vd, vd ** 2, m["vinf_arr_m_s"] / 1e3))
+    print("飞越 rp：%s" % " / ".join(
+        "%s %.1f km" % (f["body"], f["rp_km"]) for f in nodes["flybys"]))
+    dm = m.get("dsm_mag_m_s") or []
+    if any(dm):
+        print("DSM：%s，合计 %.1f m/s"
+              % (" / ".join("%.1f" % q for q in dm), float(sum(dm))))
+    print("染色体 -> %s_x.json；nodes -> %s"
+          % (os.path.splitext(a.out)[0], path))
+    if a.selfcheck:
+        return 0 if _selfcheck(udp, x, nodes) else 1
 
 
 if __name__ == "__main__":
-    run()
+    # pykep 3.0.1 解释器退出时偶发堆析构错误（C++ 析构顺序问题，不影响已打印
+    # 结果），统一在出口 os._exit() 收口：退出码透传，异常打印 traceback 后以 1 退出。
+    import sys
+    _code = 0
+    try:
+        _code = run() or 0
+    except SystemExit as e:
+        _code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+        _code = 1
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(_code)
