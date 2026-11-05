@@ -254,7 +254,7 @@ def bplane_from_state(r_rel, v_rel, mu=GM["mars"]):
     H = math.acosh(max(1.0, (e + math.cos(nu)) / (1 + e * math.cos(nu))))
     # (3.108)：τ = sqrt(-a³/μ)(sinhH − H)（书的记法；桥接段 SOI 计时另用
     # 含 e 的标准双曲开普勒式，见 _b_hyper_exit_days），近火点前为正
-    tau = math.sqrt(-a**3 / mu) * (math.sinh(H) - H)
+    tau = math.sqrt(-a**3 / mu) * (e * math.sinh(H) - H)
     if np.dot(r_rel, v_rel) < 0:
         tau = -tau
     return BT, BR, tau, b_mag, e, vinf
