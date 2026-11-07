@@ -1,0 +1,247 @@
+%General Mission Analysis Tool(GMAT) Script
+%Created: 2026-10-21 21:53:02
+
+
+%----------------------------------------
+%---------- Spacecraft
+%----------------------------------------
+
+Create Spacecraft DefaultSC;
+GMAT DefaultSC.DateFormat = UTCGregorian;
+GMAT DefaultSC.Epoch = '22 Jul 2020 00:43:41.800';
+GMAT DefaultSC.CoordinateSystem = EarthICRF;
+GMAT DefaultSC.DisplayStateType = Cartesian;
+GMAT DefaultSC.X = -4009.360200000005;
+GMAT DefaultSC.Y = -4704.998300000005;
+GMAT DefaultSC.Z = -2249.424000000001;
+GMAT DefaultSC.VX = 7.896362000000003;
+GMAT DefaultSC.VY = -8.018712999999996;
+GMAT DefaultSC.VZ = 2.697877000000002;
+GMAT DefaultSC.DryMass = 850;
+GMAT DefaultSC.Cd = 2.2;
+GMAT DefaultSC.Cr = 1.8;
+GMAT DefaultSC.DragArea = 15;
+GMAT DefaultSC.SRPArea = 1;
+GMAT DefaultSC.SPADDragScaleFactor = 1;
+GMAT DefaultSC.SPADSRPScaleFactor = 1;
+GMAT DefaultSC.AtmosDensityScaleFactor = 1;
+GMAT DefaultSC.ExtendedMassPropertiesModel = 'None';
+GMAT DefaultSC.NAIFId = -10000001;
+GMAT DefaultSC.NAIFIdReferenceFrame = -9000001;
+GMAT DefaultSC.OrbitColor = Red;
+GMAT DefaultSC.TargetColor = Teal;
+GMAT DefaultSC.OrbitErrorCovariance = [ 1e+70 0 0 0 0 0 ; 0 1e+70 0 0 0 0 ; 0 0 1e+70 0 0 0 ; 0 0 0 1e+70 0 0 ; 0 0 0 0 1e+70 0 ; 0 0 0 0 0 1e+70 ];
+GMAT DefaultSC.CdSigma = 1e+70;
+GMAT DefaultSC.CrSigma = 1e+70;
+GMAT DefaultSC.Id = 'SatId';
+GMAT DefaultSC.Attitude = CoordinateSystemFixed;
+GMAT DefaultSC.SPADSRPInterpolationMethod = Bilinear;
+GMAT DefaultSC.SPADSRPScaleFactorSigma = 1e+70;
+GMAT DefaultSC.SPADDragInterpolationMethod = Bilinear;
+GMAT DefaultSC.SPADDragScaleFactorSigma = 1e+70;
+GMAT DefaultSC.AtmosDensityScaleFactorSigma = 1e+70;
+GMAT DefaultSC.ModelFile = 'aura.3ds';
+GMAT DefaultSC.ModelOffsetX = 0;
+GMAT DefaultSC.ModelOffsetY = 0;
+GMAT DefaultSC.ModelOffsetZ = 0;
+GMAT DefaultSC.ModelRotationX = 0;
+GMAT DefaultSC.ModelRotationY = 0;
+GMAT DefaultSC.ModelRotationZ = 0;
+GMAT DefaultSC.ModelScale = 1;
+GMAT DefaultSC.AttitudeDisplayStateType = 'Quaternion';
+GMAT DefaultSC.AttitudeRateDisplayStateType = 'AngularVelocity';
+GMAT DefaultSC.AttitudeCoordinateSystem = EarthMJ2000Eq;
+GMAT DefaultSC.EulerAngleSequence = '321';
+
+
+
+
+%----------------------------------------
+%---------- ForceModels
+%----------------------------------------
+
+Create ForceModel earthprop_ForceModel;
+GMAT earthprop_ForceModel.CentralBody = Earth;
+GMAT earthprop_ForceModel.PointMasses = {Earth, Luna, Sun};
+GMAT earthprop_ForceModel.Drag = None;
+GMAT earthprop_ForceModel.SRP = Off;
+GMAT earthprop_ForceModel.RelativisticCorrection = Off;
+GMAT earthprop_ForceModel.ErrorControl = RSSStep;
+
+Create ForceModel solprop_ForceModel;
+GMAT solprop_ForceModel.CentralBody = Sun;
+GMAT solprop_ForceModel.PointMasses = {Earth, Jupiter, Luna, Mars, Sun};
+GMAT solprop_ForceModel.Drag = None;
+GMAT solprop_ForceModel.SRP = Off;
+GMAT solprop_ForceModel.RelativisticCorrection = Off;
+GMAT solprop_ForceModel.ErrorControl = RSSStep;
+
+Create ForceModel marsprop_ForceModel;
+GMAT marsprop_ForceModel.CentralBody = Mars;
+GMAT marsprop_ForceModel.PrimaryBodies = {Mars};
+GMAT marsprop_ForceModel.PointMasses = {Sun};
+GMAT marsprop_ForceModel.Drag = None;
+GMAT marsprop_ForceModel.SRP = Off;
+GMAT marsprop_ForceModel.RelativisticCorrection = Off;
+GMAT marsprop_ForceModel.ErrorControl = RSSStep;
+GMAT marsprop_ForceModel.GravityField.Mars.Degree = 4;
+GMAT marsprop_ForceModel.GravityField.Mars.Order = 4;
+GMAT marsprop_ForceModel.GravityField.Mars.StmLimit = 100;
+GMAT marsprop_ForceModel.GravityField.Mars.PotentialFile = 'Mars50c.cof';
+GMAT marsprop_ForceModel.GravityField.Mars.TideModel = 'None';
+
+%----------------------------------------
+%---------- Propagators
+%----------------------------------------
+
+Create Propagator earthprop;
+GMAT earthprop.FM = earthprop_ForceModel;
+GMAT earthprop.Type = PrinceDormand78;
+GMAT earthprop.InitialStepSize = 600;
+GMAT earthprop.Accuracy = 1e-13;
+GMAT earthprop.MinStep = 0;
+GMAT earthprop.MaxStep = 86400;
+GMAT earthprop.MaxStepAttempts = 50;
+GMAT earthprop.StopIfAccuracyIsViolated = true;
+
+Create Propagator solprop;
+GMAT solprop.FM = solprop_ForceModel;
+GMAT solprop.Type = PrinceDormand78;
+GMAT solprop.InitialStepSize = 600;
+GMAT solprop.Accuracy = 1e-13;
+GMAT solprop.MinStep = 0;
+GMAT solprop.MaxStep = 86400;
+GMAT solprop.MaxStepAttempts = 50;
+GMAT solprop.StopIfAccuracyIsViolated = true;
+
+Create Propagator marsprop;
+GMAT marsprop.FM = marsprop_ForceModel;
+GMAT marsprop.Type = PrinceDormand78;
+GMAT marsprop.InitialStepSize = 600;
+GMAT marsprop.Accuracy = 1e-13;
+GMAT marsprop.MinStep = 0;
+GMAT marsprop.MaxStep = 86400;
+GMAT marsprop.MaxStepAttempts = 50;
+GMAT marsprop.StopIfAccuracyIsViolated = true;
+
+%----------------------------------------
+%---------- Coordinate Systems
+%----------------------------------------
+
+Create CoordinateSystem solxyz;
+GMAT solxyz.Origin = Sun;
+GMAT solxyz.Axes = ICRF;
+
+Create CoordinateSystem marsxyz;
+GMAT marsxyz.Origin = Mars;
+GMAT marsxyz.Axes = Equator;
+
+%----------------------------------------
+%---------- Subscribers
+%----------------------------------------
+
+Create OrbitView DefaultOrbitView;
+GMAT DefaultOrbitView.SolverIterations = Current;
+GMAT DefaultOrbitView.UpperLeft = [ 0.02478632478632479 0.03321976149914821 ];
+GMAT DefaultOrbitView.Size = [ 0.3311965811965812 0.6959114139693356 ];
+GMAT DefaultOrbitView.RelativeZOrder = 193;
+GMAT DefaultOrbitView.Maximized = false;
+GMAT DefaultOrbitView.Add = {DefaultSC, Earth};
+GMAT DefaultOrbitView.CoordinateSystem = EarthMJ2000Eq;
+GMAT DefaultOrbitView.DrawObject = [ true true ];
+GMAT DefaultOrbitView.DataCollectFrequency = 1;
+GMAT DefaultOrbitView.UpdatePlotFrequency = 50;
+GMAT DefaultOrbitView.NumPointsToRedraw = 0;
+GMAT DefaultOrbitView.ShowPlot = true;
+GMAT DefaultOrbitView.MaxPlotPoints = 20000;
+GMAT DefaultOrbitView.ShowLabels = true;
+GMAT DefaultOrbitView.ViewPointReference = Earth;
+GMAT DefaultOrbitView.ViewPointVector = [ 30000 0 0 ];
+GMAT DefaultOrbitView.ViewDirection = Earth;
+GMAT DefaultOrbitView.ViewScaleFactor = 1;
+GMAT DefaultOrbitView.ViewUpCoordinateSystem = EarthMJ2000Eq;
+GMAT DefaultOrbitView.ViewUpAxis = Z;
+GMAT DefaultOrbitView.EclipticPlane = Off;
+GMAT DefaultOrbitView.XYPlane = On;
+GMAT DefaultOrbitView.WireFrame = Off;
+GMAT DefaultOrbitView.Axes = On;
+GMAT DefaultOrbitView.Grid = Off;
+GMAT DefaultOrbitView.SunLine = Off;
+GMAT DefaultOrbitView.UseInitialView = On;
+GMAT DefaultOrbitView.StarCount = 7000;
+GMAT DefaultOrbitView.EnableStars = Off;
+GMAT DefaultOrbitView.EnableConstellations = Off;
+
+Create OrbitView OrbitView1;
+GMAT OrbitView1.SolverIterations = Current;
+GMAT OrbitView1.UpperLeft = [ 0.2457264957264957 0.120954003407155 ];
+GMAT OrbitView1.Size = [ 0.3311965811965812 0.7197614991482112 ];
+GMAT OrbitView1.RelativeZOrder = 183;
+GMAT OrbitView1.Maximized = false;
+GMAT OrbitView1.Add = {DefaultSC, Earth, Sun, Mars};
+GMAT OrbitView1.CoordinateSystem = solxyz;
+GMAT OrbitView1.DrawObject = [ true true true true ];
+GMAT OrbitView1.DataCollectFrequency = 1;
+GMAT OrbitView1.UpdatePlotFrequency = 50;
+GMAT OrbitView1.NumPointsToRedraw = 0;
+GMAT OrbitView1.ShowPlot = true;
+GMAT OrbitView1.MaxPlotPoints = 20000;
+GMAT OrbitView1.ShowLabels = true;
+GMAT OrbitView1.ViewPointReference = Sun;
+GMAT OrbitView1.ViewPointVector = [ 0 0 1183000000 ];
+GMAT OrbitView1.ViewDirection = Sun;
+GMAT OrbitView1.ViewScaleFactor = 1;
+GMAT OrbitView1.ViewUpCoordinateSystem = solxyz;
+GMAT OrbitView1.ViewUpAxis = Z;
+GMAT OrbitView1.EclipticPlane = Off;
+GMAT OrbitView1.XYPlane = On;
+GMAT OrbitView1.WireFrame = Off;
+GMAT OrbitView1.Axes = On;
+GMAT OrbitView1.Grid = Off;
+GMAT OrbitView1.SunLine = Off;
+GMAT OrbitView1.UseInitialView = On;
+GMAT OrbitView1.StarCount = 7000;
+GMAT OrbitView1.EnableStars = Off;
+GMAT OrbitView1.EnableConstellations = Off;
+
+Create OrbitView OrbitView2;
+GMAT OrbitView2.SolverIterations = Current;
+GMAT OrbitView2.UpperLeft = [ 0.4705128205128205 0.1754684838160136 ];
+GMAT OrbitView2.Size = [ 0.5 0.4497444633730835 ];
+GMAT OrbitView2.RelativeZOrder = 191;
+GMAT OrbitView2.Maximized = false;
+GMAT OrbitView2.Add = {DefaultSC, Mars};
+GMAT OrbitView2.CoordinateSystem = marsxyz;
+GMAT OrbitView2.DrawObject = [ true true ];
+GMAT OrbitView2.DataCollectFrequency = 1;
+GMAT OrbitView2.UpdatePlotFrequency = 50;
+GMAT OrbitView2.NumPointsToRedraw = 0;
+GMAT OrbitView2.ShowPlot = true;
+GMAT OrbitView2.MaxPlotPoints = 20000;
+GMAT OrbitView2.ShowLabels = true;
+GMAT OrbitView2.ViewPointReference = Mars;
+GMAT OrbitView2.ViewPointVector = [ 0 0 2390000 ];
+GMAT OrbitView2.ViewDirection = Mars;
+GMAT OrbitView2.ViewScaleFactor = 1;
+GMAT OrbitView2.ViewUpCoordinateSystem = marsxyz;
+GMAT OrbitView2.ViewUpAxis = Z;
+GMAT OrbitView2.EclipticPlane = Off;
+GMAT OrbitView2.XYPlane = On;
+GMAT OrbitView2.WireFrame = Off;
+GMAT OrbitView2.Axes = On;
+GMAT OrbitView2.Grid = Off;
+GMAT OrbitView2.SunLine = Off;
+GMAT OrbitView2.UseInitialView = On;
+GMAT OrbitView2.StarCount = 7000;
+GMAT OrbitView2.EnableStars = Off;
+GMAT OrbitView2.EnableConstellations = Off;
+
+
+%----------------------------------------
+%---------- Mission Sequence
+%----------------------------------------
+
+BeginMissionSequence;
+Propagate earthprop(DefaultSC) {DefaultSC.UTCModJulian = 29055.22777777778};
+Propagate solprop(DefaultSC) {DefaultSC.UTCModJulian = 29254.5};
+Propagate marsprop(DefaultSC) {DefaultSC.Mars.Periapsis};
