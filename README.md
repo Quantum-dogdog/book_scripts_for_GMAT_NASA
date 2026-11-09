@@ -67,21 +67,20 @@ python step10.py --script step6v4.script --epoch 34731.721007756 \
         # --start 的数值顺序按 --inspect 打印的 control 顺序；--scan 步长要够细
 ```
 
-`--out`/`--csv` 的例子都写当前目录（Windows 下没有 /tmp，别照抄 Linux 习惯），  
-跑出来的 *_run.* / replay\_* 是临时产物，看完删掉即可；data/ 里留的是复现基准。
+
 
 ## 环境
 
 ```bash
 export PYTHONIOENCODING=utf-8                       # Windows 控制台是 GBK
-DE421_PATH="E:/ss/de405.bsp" python step6_引力辅助修正与EMEJ桥接.py --book
+DE421_PATH="E:/ss/de421.bsp" python step6_引力辅助修正与EMEJ桥接.py --book
         # 桥接/星历档由 DE421_PATH 指定；换一份 SPK 会改动桥接残差（木星那一段最敏感）
 ```
 
 step8v4 用兼容层认 pykep 版本（3.x 走 `udpla.jpl_lp`，2.x 走 `planet.jpl_lp`），两版都  
 不用改调用；jpl_lp 节点历元相对标准 J2000 恒差 −0.5 d，`--eph de421` 强制 0，  
 `--epoch-shift` 手动覆盖。GMAT 的 `TDBModJulian` 基准是 JD 2430000.0（1941-01-05 12:00），  
-与标准 MJD 差 29999.5 d，script 里的历元别自己换算完往里填，让 GMAT 报一遍最省事。  
+与标准 MJD 差 29999.5 d。  
 step10 找 GmatConsole 的顺序是 `--gmat-console` > `GMAT_CONSOLE` > `--gmat-root`/`GMAT_ROOT`
 
 > PATH > 各平台默认安装路径；Windows 输出走 cp936，上真机先跑 `--self-test` 和 `--inspect`。
