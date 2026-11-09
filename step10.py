@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+
 """
 gmat_outer_target.py -- GMAT 外层打靶通用工具（单文件 / 纯标准库 / Windows + Linux）
 
@@ -48,10 +47,16 @@ gmat_outer_target.py -- GMAT 外层打靶通用工具（单文件 / 纯标准库
 * RunInitialGuess 的 Target 只施加 Vary 初值、从不求解，其 Achieve 值
   是"名义目标"，正好拿来当 y*，但不能当作已收敛的结果。
 
-跨平台
-------
-控制台可执行文件自动探测顺序：--gmat-console > 环境变量 GMAT_CONSOLE >
---gmat-root / GMAT_ROOT > PATH > 各平台常见安装路径。
+跨平台 / 后端
+-------------
+两种驱动方式，--backend 选择（默认 auto，先找控制台，找不到自动回退）：
+  console : GmatConsole -r <script> -l <log>。探测顺序 --gmat-console >
+           环境变量 GMAT_CONSOLE > --gmat-root / GMAT_ROOT > PATH > 常见安装路径。
+  gmatpy  : Windows 发行版不带 GmatConsole 时走这条。用 GMAT 自带 bin/gmatpy
+           （R2020a 起的 Python API）：Setup -> LoadScript -> RunScript，
+           每个变体起一个干净子进程，等价于每次新开一个控制台。
+           --gmat-root 指到安装根目录；bin/gmatpy/_pyXY 需与解释器版本对应
+           （R2022a 官方测试 Python 3.9）。
 Linux 设 LD_LIBRARY_PATH(bin:lib:plugins)，Windows 把 bin 加到 PATH；
 cwd 固定为 bin（GMAT 需要相对资源）。路径一律用 pathlib，报告/脚本用
 绝对路径；GMAT 接受正斜杠，Windows 下自动 as_posix()。
@@ -82,6 +87,11 @@ cwd 固定为 bin（GMAT 需要相对资源）。路径一律用 pathlib，报�
       --gmat-root "C:\\Program Files\\GMAT\\R2022a" --epoch 34731.721007756 `
       --verify-only -3174.805517 12486.774499
 
+  # Windows 没有 GmatConsole：走自带 Python API（默认 auto 也会自动回退）
+  python gmat_outer_target.py --script "D:\\gmat\\step6v2.script" `
+      --gmat-root "E:\\GMAT" --backend gmatpy --epoch 34731.721007756 `
+      --verify-only -3174.805517 12486.774499
+
 注意：--verify-only / --set 的数值顺序必须与 --inspect 打印的 control 顺序一致。
 """
 from __future__ import annotations
@@ -110,13 +120,13 @@ def _setup_stdio():
 
 # ---------------------------------------------------------------- 线性代数
 def solve_linear(A, b):
-    """高斯消元（部分主元），返回 x。A 为 n x n，b 长 n。"""
+    'Gaussian elimination with partial pivoting. A is n x n, b has length n.'
     n = len(b)
     M = [list(map(float, A[i])) + [float(b[i])] for i in range(n)]
     for c in range(n):
         p = max(range(c, n), key=lambda r: abs(M[r][c]))
         if abs(M[p][c]) < 1e-14:
-            raise ValueError("奇异矩阵，无法求牛顿步长")
+            raise ValueError('Singular matrix; cannot compute the Newton step')
         M[c], M[p] = M[p], M[c]
         for r in range(c + 1, n):
             f = M[r][c] / M[c][c]
@@ -135,7 +145,7 @@ def mat_vec(A, x):
 
 
 def lsq_step(J, d, damp=1e-9):
-    """求 dx 使 J dx ~ -d；方阵直接解，非方阵用 (J^T J + lam I) 最小二乘。"""
+    'Solve J dx ~ -d: direct solve for square J, damped least squares (J^T J + lam I) otherwise.'
     m, n = len(J), len(J[0])
     if m == n:
         return solve_linear(J, [-v for v in d])
@@ -152,7 +162,7 @@ def norm(v):
 
 
 def fmt(v):
-    """GMAT 可读且保真的数值写法（15 位有效数字，够覆盖 MJD 级历元）。"""
+    'GMAT-readable lossless number format (15 significant digits, enough for MJD-scale epochs).'
     return "%.15g" % v
 
 
@@ -219,7 +229,7 @@ class ScriptModel:
 
         self.begin = next((i for i, l in enumerate(self.lines) if RE_BEGIN.match(l)), None)
         if self.begin is None:
-            raise ValueError("script 里找不到 BeginMissionSequence;")
+            raise ValueError('BeginMissionSequence; not found in script')
 
         self.objects = {}
         for l in self.lines[:self.begin]:
@@ -259,7 +269,29 @@ class ScriptModel:
     def control_target(self):
         s = [t for t in self.targets if t.solve and t.achieves]
         if not s:
-            raise ValueError("找不到 SolveMode = Solve 且带 Achieve 的 Target 块")
+            msg = ['No Target block with SolveMode = Solve and an Achieve found.',
+                   '  %d lines, BeginMissionSequence at L%d, %d Target block(s) parsed:'
+                   % (len(self.lines), self.begin + 1, len(self.targets))]
+            for t in self.targets:
+                msg.append("    L%d-L%d  SolveMode=%s  Achieve=%d  Vary=%d"
+                           % (t.start + 1, t.end + 1, t.mode,
+                              len(t.achieves), len(t.varies)))
+            kw = [sum(1 for l in self.lines if re.search(p, l, re.I))
+                  for p in (r"\bTarget\b", r"\bAchieve\b", r"SolveMode", r"EndTarget")]
+            msg.append('  Keyword counts: Target=%d  Achieve=%d  SolveMode=%d  EndTarget=%d'
+                       % tuple(kw))
+            if not self.targets:
+                msg.append('  No Target block parsed: this script may have no '
+                           'DifferentialCorrector (e.g. only object definitions / plain propagate / back-propagation).')
+                msg.append('  step10 is an outer-loop targeting tool; it requires a '
+                           'script with Target{...Achieve...}. Use a different --script.')
+            elif kw[1] > 0 and all(not t.achieves for t in self.targets):
+                msg.append('  Achieve lines exist but were not matched inside a block: check '
+                           'that Achieve DC(field = number, {...}); uses a plain numeric value with complete brackets, commas and semicolon.')
+            else:
+                msg.append('  Target blocks exist, but none has both SolveMode = Solve '
+                           'and an Achieve inside.')
+            raise ValueError("\n".join(msg))
         return s[-1]                       # 最后一根腿
 
     def goal_target(self):
@@ -268,21 +300,21 @@ class ScriptModel:
         return later[-1] if later else None
 
     def auto_cut(self, goal):
-        """截断点（0-based 行索引）：目标块起始行；无目标块则到文件末。"""
+        'Cut point (0-based line index): start line of the goal block; end of file if none.'
         return goal.start if goal is not None else len(self.lines)
 
     def auto_epoch(self):
         return max(self.epochs) if self.epochs else None
 
     def obs_prefix(self, field):
-        """从 Achieve 字段推断坐标系前缀，如 DefaultSC.Juxyz.BdotR -> DefaultSC.Juxyz。"""
+        'Infer the coordinate-system prefix from an Achieve field, e.g. DefaultSC.Juxyz.BdotR -> DefaultSC.Juxyz.'
         parts = field.split(".")
         if len(parts) >= 2:
             return ".".join(parts[:-1]), parts[-2]
         return None, None
 
     def xyz_cols(self, fields):
-        """给目标字段补 X/Y/Z、VX/VY/VZ 列（仅当坐标系在 script 里声明过）。"""
+        'Add X/Y/Z and VX/VY/VZ columns for goal fields (only if the CS is declared in the script).'
         cols = []
         for f in fields:
             prefix, short = self.obs_prefix(f)
@@ -311,7 +343,7 @@ GMAT rf.WriteHeaders = false;
 
 
 class VariantBuilder:
-    """只在临时目录写变体；原 script 全程只读。"""
+    'Write variants only to the temp dir; the original script is always read-only.'
 
     def __init__(self, model, workdir, cut_at, propagator=None, extra_cols=None,
                  no_burn_cols=False):
@@ -323,19 +355,19 @@ class VariantBuilder:
         self.no_burn_cols = no_burn_cols
 
     def build(self, controls, x, epochs, tag, cols=None):
-        """controls: [Achieve]; x: 同长度数值; epochs: [float]; 返回 (script_path, report_path, cols)"""
+        'controls: [Achieve]; x: same-length numbers; epochs: [float]; returns (script_path, report_path, cols)'
         m = self.m
         lines = list(m.lines)
 
         # 1) 按行号精确替换 Achieve 数值（保留 Tolerance 等全部其余文本）
         for a, v in zip(controls, x):
             if a.line_no >= self.cut_at:
-                print("[WARN] 控制行 L%d 在截断点之后，未替换" % (a.line_no + 1))
+                print('[WARN] control line L%d is after the cut point, not replaced' % (a.line_no + 1))
                 continue
             old = lines[a.line_no]
             mm = re.search(r"(=\s*)([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", old)
             if not mm:
-                print("[WARN] L%d 未找到数值，跳过" % (a.line_no + 1))
+                print('[WARN] L%d: no numeric value found, skipped' % (a.line_no + 1))
                 continue
             lines[a.line_no] = old[:mm.start(2)] + fmt(v) + old[mm.end(2):]
 
@@ -387,7 +419,12 @@ class RunResult:
 
     @property
     def ok(self):
-        return self.rc == 0 and bool(self.rows) and "Mission run completed" in self.out
+        # 控制台把 "Mission run completed" 打到 stdout；gmatpy 后端靠
+        # UseLogFile 把同一份 GMAT 日志并回 out，口径一致。
+        # GMATPY_RUNSCRIPT_OK 是 RunScript() 真实返回值的兜底（日志没写成时）。
+        completed = ("Mission run completed" in self.out
+                     or "GMATPY_RUNSCRIPT_OK" in self.out)
+        return self.rc == 0 and bool(self.rows) and completed
 
     def errors(self, n=8):
         pat = re.compile(r"ERROR|Exception|failed|disallowed|not an allowed|violat|TIMEOUT", re.I)
@@ -409,6 +446,7 @@ class GmatRunner:
         self.workdir = Path(workdir or tempfile.mkdtemp(prefix="gmat_outer_"))
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.console = self._find(console, root)
+        self.label = 'console %s' % self.console
 
     def _find(self, explicit, root):
         names = (["GmatConsole-R2022a.exe", "GmatConsole.exe"] if self.is_windows
@@ -439,8 +477,8 @@ class GmatRunner:
             except OSError:
                 pass
         raise FileNotFoundError(
-            "找不到 GMAT 控制台。用 --gmat-console 指定完整路径，或 --gmat-root 指定安装根目录，"
-            "或设环境变量 GMAT_CONSOLE / GMAT_ROOT。已尝试: %s" % ", ".join(map(str, cands[:8])))
+            'GmatConsole not found. Use --gmat-console for the full path, or --gmat-root for the install root, '
+            'or set GMAT_CONSOLE / GMAT_ROOT. Tried: %s' % ", ".join(map(str, cands[:8])))
 
     def env(self):
         e = dict(os.environ)
@@ -497,6 +535,164 @@ class GmatRunner:
         return RunResult(rc, out, rows, log, script, report)
 
 
+# ---------------------------------------------------------------- gmatpy 后端
+# Windows 的 GMAT 发行版不带 GmatConsole，但自带 bin/gmatpy（R2020a 起的 Python
+# API）。线索来自 GMAT 自带 api/load_gmat.py 与 api/API_README.txt：
+#   Setup(api_startup_file.txt) -> LoadScript(script) -> RunScript()
+# 每个变体起一个干净的子进程，等价于「每次新开一个控制台」，避免同一进程反复
+# LoadScript 造成对象累积。Report 仍由 script 内的 ReportFile 写出，读法不变。
+GMATPY_BOOTSTRAP = r'''
+import os, re, sys
+bin_path = os.path.abspath(sys.argv[1])
+startup  = os.path.abspath(sys.argv[2])
+script   = os.path.abspath(sys.argv[3])
+log_path = os.path.abspath(sys.argv[4])
+gmat_dir = os.path.dirname(bin_path)
+if os.name == "nt":
+    for p in (bin_path, os.path.join(gmat_dir, "plugins")):
+        try:
+            os.add_dll_directory(p)
+        except (AttributeError, OSError):
+            pass
+    os.environ["PATH"] = (bin_path + os.pathsep + os.path.join(gmat_dir, "plugins")
+                          + os.pathsep + os.environ.get("PATH", ""))
+sys.path.insert(0, bin_path)
+try:
+    import gmatpy as gmat
+except ImportError:
+    # gmatpy 按 sys.version_info 找 _pyXY 目录；解释器比发行版新时没有对应目录。
+    # Linux 上 .so 常能跨小版本加载，这里退到最新的一个（Windows 的 .pyd
+    # 绑定 python3X.dll，通常仍会失败，报错会原样打出来）。
+    pkg = os.path.join(bin_path, "gmatpy")
+    vers = sorted([d for d in os.listdir(pkg) if re.fullmatch(r"_py\d+", d)],
+                  key=lambda d: int(d[3:]), reverse=True)
+    if not vers:
+        raise
+    sys.path.insert(0, os.path.join(pkg, vers[0]))
+    import gmat_py as gmat
+    gmat.FileManager.Instance().SetBinDirectory(
+        "gmat_startup_file.txt", bin_path + os.sep)
+gmat.Setup(startup)
+try:
+    # API 不把运行消息打到 stdout，让 GMAT 自己写日志；调用方把它并回 out，
+    # 这样 "Mission run completed" / "The Targeter converged" 与控制台口径一致。
+    gmat.UseLogFile(log_path)
+except Exception:
+    pass
+gmat.LoadScript(script)
+ok = gmat.RunScript()
+print("GMATPY_RUNSCRIPT_OK" if ok else "GMATPY_RUNSCRIPT_FAILED")
+'''
+
+
+class GmatPyRunner:
+    'Same interface as GmatRunner, but drives GMAT via its bundled Python API; no GmatConsole needed.'
+
+    def __init__(self, root=None, workdir=None, timeout=900, is_windows=None):
+        self.is_windows = (os.name == "nt") if is_windows is None else is_windows
+        self.timeout = timeout
+        self.workdir = Path(workdir or tempfile.mkdtemp(prefix="gmat_outer_"))
+        self.workdir.mkdir(parents=True, exist_ok=True)
+        self.bin = self._find_bin(root)
+        self.startup = self._make_startup()
+        self.label = "gmatpy (Python API, %s)" % self.bin
+
+    def _find_bin(self, root):
+        cands = []
+        if root:
+            cands.append(Path(root))
+        if os.environ.get("GMAT_ROOT"):
+            cands.append(Path(os.environ["GMAT_ROOT"]))
+        cands += [Path(p) for p in
+                  GmatRunner.COMMON_ROOTS["nt" if self.is_windows else "posix"]]
+        if self.is_windows:
+            for d in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+                cands.append(Path(d + ":\\GMAT"))
+                cands.append(Path(d + ":\\GMAT\\R2022a"))
+        for c in cands:
+            for b in (c / "bin", c):
+                try:
+                    if ((b / "gmatpy" / "__init__.py").is_file()
+                            and (b / "gmat_startup_file.txt").is_file()):
+                        return b.resolve()
+                except OSError:
+                    pass
+        raise FileNotFoundError(
+            'bin/gmatpy not found (Windows builds ship no GmatConsole; use the Python API backend).'
+            'Use --gmat-root for the install root (containing bin/gmatpy), or set GMAT_ROOT.')
+
+    def _make_startup(self):
+        """照官方 api/BuildApiStartupFile.py：把 gmat_startup_file.txt 里的 ..
+        换成安装根目录的绝对路径。写到工作目录，不碰安装目录（免管理员权限）。"""
+        src = self.bin / "gmat_startup_file.txt"
+        text = src.read_text(encoding="utf-8", errors="replace")
+        text = text.replace("..", str(self.bin.parent))
+        out = self.workdir / "api_startup_file.txt"
+        out.write_text(text, encoding="utf-8", errors="replace")
+        return out.resolve()
+
+    def env(self):
+        e = dict(os.environ)
+        bin_ = str(self.bin)
+        root = str(self.bin.parent)
+        if self.is_windows:
+            e["PATH"] = bin_ + ";" + root + "\\plugins" + ";" + e.get("PATH", "")
+        else:
+            parts = [bin_, root + "/lib", root + "/plugins"]
+            if e.get("LD_LIBRARY_PATH"):
+                parts.append(e["LD_LIBRARY_PATH"])
+            e["LD_LIBRARY_PATH"] = ":".join(parts)
+        return e
+
+    def run(self, script, report, tag, timeout=None):
+        report = Path(report)
+        try:
+            report.unlink()
+        except OSError:
+            pass
+        log = self.workdir / ("gmatpy_%s.log" % tag)
+        cmd = [sys.executable, "-c", GMATPY_BOOTSTRAP,
+               str(self.bin), str(self.startup), str(Path(script).resolve()),
+               str(log.resolve())]
+        try:
+            p = subprocess.run(cmd, cwd=str(self.bin), env=self.env(),
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=timeout or self.timeout)
+            out, rc = (p.stdout or "") + (p.stderr or ""), p.returncode
+        except subprocess.TimeoutExpired as ex:
+            o = ex.stdout or ""
+            if isinstance(o, bytes):
+                o = o.decode("utf-8", "replace")
+            out, rc = o + "\n[TIMEOUT]", -9
+        except OSError as ex:
+            out, rc = "[LAUNCH FAILED] %s" % ex, -1
+        try:
+            msg = log.read_text(encoding="utf-8", errors="replace")
+            if msg:
+                out += "\n[GMAT LOG]\n" + msg
+        except OSError:
+            pass
+        stdlog = self.workdir / ("stdout_%s.log" % tag)
+        try:
+            stdlog.write_text(out, encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+        rows = []
+        try:
+            for line in report.read_text(encoding="utf-8", errors="replace").splitlines():
+                t = line.split()
+                if not t:
+                    continue
+                try:
+                    nums = [float(v) for v in t]
+                except ValueError:
+                    continue
+                rows.append(nums)
+        except OSError:
+            pass
+        return RunResult(rc, out, rows, log, script, report)
+
+
 # ---------------------------------------------------------------- 外层打靶
 class OuterTargeter:
     def __init__(self, model, builder, runner, controls, goal_fields, goal_values,
@@ -521,11 +717,11 @@ class OuterTargeter:
         sp, rp, cols = self.b.build(self.controls, x, ep, tag)
         res = self.r.run(sp, rp, tag)
         if not res.rows:
-            self._p("  [%s] 无报告行 rc=%s %s" % (tag, res.rc, " | ".join(res.errors(2))))
+            self._p('  [%s] no report rows rc=%s %s' % (tag, res.rc, " | ".join(res.errors(2))))
             return None, res, cols
         row = res.rows[-1]
         if len(row) < len(cols):
-            self._p("  [%s] 报告列数 %d < 期望 %d" % (tag, len(row), len(cols)))
+            self._p('  [%s] report has %d cols < expected %d' % (tag, len(row), len(cols)))
             return None, res, cols
         y = [row[cols.index(f)] for f in self.goal_fields]
         return y, res, cols
@@ -547,24 +743,24 @@ class OuterTargeter:
 
     def solve(self, x0):
         x = list(x0)
-        self._p("=== 基线 ===")
+        self._p('=== Baseline ===')
         f0, res, cols = self.probe(x, "base")
         if f0 is None:
-            self._p("基线运行失败，终止。")
+            self._p('Baseline run failed; aborting.')
             return x, None, res
         d = [f0[i] - self.goal[i] for i in range(len(self.goal))]
         self._p("  x0=%s" % [fmt(v) for v in x])
-        self._p("  y =%s  目标=%s  残差=%s  |d|=%.6g  收敛=%d"
+        self._p('  y =%s  goal=%s  residual=%s  |d|=%.6g  converged=%d'
                 % ([fmt(v) for v in f0], [fmt(v) for v in self.goal],
                    [fmt(v) for v in d], norm(d), res.converged))
         if norm(d) < self.tol:
-            self._p("  基线已达标，无需迭代。")
+            self._p('  Baseline already within tolerance; no iteration needed.')
             return x, f0, res
 
-        self._p("=== 有限差分雅可比 (h=%g) ===" % self.fd_step)
+        self._p('=== Finite-difference Jacobian (h=%g) ===' % self.fd_step)
         f0, J = self.finite_diff(x, self.fd_step)
         if J is None:
-            self._p("有限差分失败，终止。")
+            self._p('Finite difference failed; aborting.')
             return x, None, res
         for row in J:
             self._p("  " + "  ".join("%+.6g" % v for v in row))
@@ -574,15 +770,15 @@ class OuterTargeter:
         for it in range(self.max_iter):
             f, r_, _ = self.probe(x, "nw%d" % it)
             if f is None:
-                self._p("iter %d 探测失败，步长减半重试" % it)
+                self._p('iter %d probe failed; halving step and retrying' % it)
                 return x, None, r_
             d = [f[i] - self.goal[i] for i in range(len(self.goal))]
             self._p("iter %d: x=%s" % (it, [fmt(v) for v in x]))
-            self._p("         y=%s  |d|=%.6g  收敛=%d"
+            self._p('         y=%s  |d|=%.6g  converged=%d'
                     % ([fmt(v) for v in f], norm(d), r_.converged))
             last_res = r_
             if norm(d) < self.tol:
-                self._p("*** 收敛：残差 %.6g < tol %g" % (norm(d), self.tol))
+                self._p('*** Converged: residual %.6g < tol %g' % (norm(d), self.tol))
                 return x, f, r_
             if it > 0:
                 dx = [x[k] - x_prev[k] for k in range(self.n)]
@@ -596,7 +792,7 @@ class OuterTargeter:
             try:
                 step = lsq_step(Jn, d)
             except ValueError as ex:
-                self._p("  %s，终止" % ex)
+                self._p('  %s; stopping' % ex)
                 return x, f, r_
             ms = self.max_step or max(1.0, 0.2 * max(abs(v) for v in x0))
             sc = min(1.0, ms / max(abs(v) for v in step)) if step else 1.0
@@ -613,10 +809,10 @@ class OuterTargeter:
                         break
                 sc *= 0.5
             if not accepted:
-                self._p("  线搜索失败，停止")
+                self._p('  Line search failed; stopping')
                 return x, f, r_
             self._p("        step=%s scale=%g" % (["%+.4g" % v for v in step], sc))
-        self._p("达到最大迭代次数 %d，将对最终值做一次独立验证" % self.max_iter)
+        self._p('Max iterations %d reached; running one independent verification of the final value' % self.max_iter)
         return x, None, last_res
 
 
@@ -628,9 +824,9 @@ def verify_scan(targeter, x, e0, e1, step):
         ep.append(e)
         e += step
     y, res, cols = targeter.probe(x, "accept", epochs=ep)
-    print("\n=== 验收：加密历元扫描 (%.2f ~ %.2f step %g, %d 点) ==="
+    print('\n=== Verification: fine epoch scan (%.2f ~ %.2f step %g, %d points) ==='
           % (e0, e1, step, len(ep)))
-    print("EXIT=%s  打靶收敛=%d  有效报告行=%d/%d"
+    print('EXIT=%s  targeter converged=%d  valid report rows=%d/%d'
           % (res.rc, res.converged, len(res.rows), len(ep)))
     if not res.rows:
         for l in res.errors():
@@ -643,7 +839,7 @@ def verify_scan(targeter, x, e0, e1, step):
             xyz = i
             break
     if xyz is None:
-        print("  报告列里没有 XYZ，跳过最近距离判据。列：", cols)
+        print('  No XYZ columns in report; skipping closest-approach check. Columns:', cols)
         return None
     recs = []
     for row in res.rows:
@@ -653,10 +849,10 @@ def verify_scan(targeter, x, e0, e1, step):
         except (IndexError, ValueError):
             continue
     best = min(recs, key=lambda q: q[1])
-    print("  真实传播 |r|min = %.6e km @ %.6f (GMAT TDBModJulian)" % (best[1], best[0]))
-    print("  注意：这是采样点上的最小值；真实连续极值可能落在两点之间，" 
-          "步长 %g 天时建议用更小的 --scan 步长复核。" % step)
-    print("  最近点邻域：")
+    print('  Propagated |r|min = %.6e km @ %.6f (GMAT TDBModJulian)' % (best[1], best[0]))
+    print('  Note: this is the minimum over sampled points; the true continuous extremum may fall between two samples, ' 
+          'so with a %g-day step, re-check using a smaller --scan step.' % step)
+    print('  Neighborhood of closest point:')
     for mjd, r, _ in recs:
         if abs(mjd - best[0]) <= max(step * 4, 1.0):
             print("    %12.4f  %12.4e km" % (mjd, r))
@@ -664,48 +860,48 @@ def verify_scan(targeter, x, e0, e1, step):
     bidx = [i for i, c in enumerate(cols) if re.search(r"\.Element\d+$", c)]
     if bidx:
         b = [best[2][i] for i in bidx if i < len(best[2])]
-        print("  burn 分量 = %s  |dv| = %.3f m/s"
+        print('  burn components = %s  |dv| = %.3f m/s'
               % ([round(v, 6) for v in b], math.sqrt(sum(v * v for v in b)) * 1000))
     if y is not None:
-        print("  说明：扫描区间内各历元的 B 平面是瞬时密切量，随历元剧烈变化，")
-        print("        不能当作命中判据；命中判据请用单个评估历元 (--epoch) 的 probe 结果。")
+        print('  Note: B-plane values across the scan are instantaneous osculating quantities and vary strongly with epoch; ')
+        print('        they are not a hit criterion. Use the probe result at the single evaluation epoch (--epoch).')
     return best
 
 
 # ---------------------------------------------------------------- 修改建议
 def print_plan(model, controls, x_final, goal, cut_at, cut_lines, epoch, res, y):
     print("\n" + "=" * 78)
-    print("修改建议（本工具不会写入原文件；下面只是给你手工粘贴用）")
+    print('Suggested edits (this tool never writes the original file; copy/paste these by hand)')
     print("=" * 78)
-    print("原文件 : %s" % model.path)
-    print("原 md5 : %s" % model.md5)
+    print('Original  : %s' % model.path)
+    print('Original md5 : %s' % model.md5)
     now = hashlib.md5(model.path.read_bytes()).hexdigest()
-    print("当前 md5: %s   %s" % (now, "未改动 (OK)" if now == model.md5 else "已被外部改动"))
-    print("评估历元: %s (沿用 script 的 TDBModJulian 单位)" % fmt(epoch))
+    print('Current md5  : %s   %s' % (now, 'unchanged (OK)' if now == model.md5 else 'CHANGED EXTERNALLY'))
+    print('Eval epoch : %s (TDBModJulian units, as in the script)' % fmt(epoch))
     print()
     for i, (a, v) in enumerate(zip(controls, x_final), 1):
         old = a.raw.strip()
         mm = re.search(r"(=\s*)([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)", old)
         new = old[:mm.start(2)] + fmt(v) + old[mm.end(2):] if mm else old
-        print("[%d] 第 %d 行  %s" % (i, a.line_no + 1, old))
-        print("    改为      %s" % new)
-        print("    即 %s : %s -> %s" % (a.field, fmt(a.value), fmt(v)))
+        print('[%d] line %d  %s' % (i, a.line_no + 1, old))
+        print('    change to %s' % new)
+        print('    i.e. %s : %s -> %s' % (a.field, fmt(a.value), fmt(v)))
         print()
     if cut_lines:
-        print("[可选] 去掉末段 DSM / 悬空打靶：删除第 %d 行起至第 %d 行（共 %d 行）"
+        print('[optional] Drop the trailing DSM / dangling targeter: delete lines %d..%d (%d lines)'
               % (cut_at + 1, cut_lines, cut_lines - cut_at))
-        print("       这段在变体里是被截断的；若你只想改打靶值而不动序列，可跳过此步。")
-        print("       注意：被删段里的 Periapsis/Apoapsis 停止条件在新轨迹上可能不触发，")
-        print("       需要在原序列末尾改用固定历元传播 + Report 才能复现上面的验收结果。")
+        print('       This tail was truncated in the variant; skip this step if you only want to change the target values.')
+        print('       Note: Periapsis/Apoapsis stop conditions in the deleted tail may never trigger on the new trajectory;')
+        print('       replace them with a fixed-epoch Propagate + Report to reproduce the scan results above.')
         print()
     if y is not None:
-        print("验证（GMAT 实跑）：")
-        print("  末端观测 y = %s" % [fmt(v) for v in y])
-        print("  目标     y* = %s" % [fmt(v) for v in goal])
-        print("  残差     |d| = %.6g km" % norm([y[i] - goal[i] for i in range(len(goal))]))
+        print('Verification (actual GMAT run):')
+        print('  terminal y  = %s' % [fmt(v) for v in y])
+        print('  target  y* = %s' % [fmt(v) for v in goal])
+        print('  residual |d| = %.6g km' % norm([y[i] - goal[i] for i in range(len(goal))]))
         if res is not None:
-            print("  EXIT=%s  打靶收敛=%d  Mission run completed=%s"
-                  % (res.rc, res.converged, "Mission run completed" in res.out))
+            print('  EXIT=%s  targeter converged=%d  run OK=%s'
+                  % (res.rc, res.converged, res.ok))
     print("=" * 78)
 
 
@@ -715,10 +911,10 @@ def self_test():
     # 1) 线性代数
     x = solve_linear([[2.0, 1.0], [1.0, 3.0]], [3.0, 5.0])
     assert abs(x[0] - 0.8) < 1e-12 and abs(x[1] - 1.4) < 1e-12
-    ok.append("高斯消元 2x2")
+    ok.append('Gaussian elimination 2x2')
     x = lsq_step([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], [1.0, 2.0, 3.0])
     assert len(x) == 2
-    ok.append("非方阵最小二乘")
+    ok.append('Non-square least squares')
     # 2) 不同命名 / 不同天体的假序列解析（CRLF + BOM）
     fake = (
         "\ufeffCreate Spacecraft Sat;\r\n"
@@ -766,7 +962,7 @@ def self_test():
     xyz = m.xyz_cols(gf)
     assert "Sat.Targetxyz.X" in xyz and "Sat.Targetxyz.VZ" in xyz, xyz
     assert m.burn_cols(ctrl) == ["TCM1.Element3"]
-    ok.append("假序列解析（非 DefaultSC / 非 solprop / CRLF + BOM）")
+    ok.append('Mock sequence parsing (non-DefaultSC / non-solprop / CRLF + BOM)')
     # 3) 变体构造：原文件 md5 不变、纯 ASCII、LF、按行号替换
     before = hashlib.md5(p.read_bytes()).hexdigest()
     wd = tmp / "work"
@@ -777,12 +973,12 @@ def self_test():
     sp, rp, cols = b.build(ctrl.achieves, [-300.0, 400.0], [10000.5, 10001.5], "t")
     assert hashlib.md5(p.read_bytes()).hexdigest() == before
     t = sp.read_bytes()
-    assert all(c < 128 for c in t), "变体含非 ASCII"
+    assert all(c < 128 for c in t), 'variant must be ASCII-only'
     assert b"\r\n" not in t
     assert "Sat.Targetxyz.BdotR = -300" in sp.read_text()
     assert "Propagate helio(Sat)" in sp.read_text()
     assert len(cols) >= 3
-    ok.append("变体构造（只读原件 / ASCII / LF / 精确替换 / 自动列）")
+    ok.append('Variant build (read-only original / ASCII / LF / exact replace / auto cols)')
     # 4) 跨平台环境分派（不实际启动 GMAT）
     dummy = wd / ("GmatConsole-R2022a.exe" if os.name == "nt" else "GmatConsole-R2022a")
     dummy.write_text("")
@@ -791,48 +987,51 @@ def self_test():
         e = r.env()
         assert (e["PATH"].count(str(r.console.parent)) >= 1) if win else ("LD_LIBRARY_PATH" in e)
         assert e.get("RUN_MODE") == "EXIT_AFTER_RUN"
-    ok.append("Windows / Linux 环境分派")
+    ok.append('Windows / Linux environment dispatch')
     shutil.rmtree(tmp, ignore_errors=True)
     print("=== SELF-TEST ===")
     for s in ok:
         print("  PASS  " + s)
-    print("全部通过（%d 项，未调用 GMAT）" % len(ok))
+    print('All %d checks passed (GMAT not called)' % len(ok))
     return 0
 
 
 # ---------------------------------------------------------------- CLI
 def build_parser():
     ap = argparse.ArgumentParser(
-        description="GMAT 外层打靶通用工具：读 script / 驱动 GMAT / 只 print 修改建议",
+        description='GMAT outer-loop targeting tool: read script / drive GMAT / print suggested edits only',
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--script", help="输入 GMAT script（只读）")
-    ap.add_argument("--gmat-console", help="GmatConsole 完整路径")
-    ap.add_argument("--gmat-root", help="GMAT 安装根目录（其下有 bin/）")
-    ap.add_argument("--workdir", help="临时变体/日志目录，默认自动建")
-    ap.add_argument("--timeout", type=float, default=900, help="单次 GMAT 超时秒数")
-    ap.add_argument("--epoch", type=float, help="评估历元（script 里 TDBModJulian 的单位）")
+    ap.add_argument("--script", help='Input GMAT script (read-only)')
+    ap.add_argument("--gmat-console", help='Full path to GmatConsole')
+    ap.add_argument("--gmat-root", help='GMAT install root (contains bin/)')
+    ap.add_argument("--backend", choices=("auto", "console", "gmatpy"), default="auto",
+                    help='auto=console first, fall back to gmatpy; console=GmatConsole only; '
+                         'gmatpy=bundled Python API only (for Windows without a console)')
+    ap.add_argument("--workdir", help='Work dir for variants/logs; auto-created by default')
+    ap.add_argument("--timeout", type=float, default=900, help='Timeout in seconds for one GMAT run')
+    ap.add_argument("--epoch", type=float, help='Evaluation epoch (TDBModJulian units as used in the script)')
     ap.add_argument("--epoch-from-last", type=float, default=0.0,
-                    help="在 script 最大 TDBModJulian 上加这个天数作为评估历元")
-    ap.add_argument("--control", action="append", help="控制字段名，可重复；默认自动取最后一根腿")
+                    help='Add this many days to the script max TDBModJulian to get the evaluation epoch')
+    ap.add_argument("--control", action="append", help='Control field name, repeatable; default = last leg (auto)')
     ap.add_argument("--goal", action="append", metavar="FIELD=VALUE",
-                    help="目标观测量，可重复；默认自动取控制块之后 Target 的 Achieve")
+                    help='Goal observable, repeatable; default = Achieve of the Target block after the control block')
     ap.add_argument("--cut-at", default="auto",
-                    help="截断点：auto / none / 1-based 行号 / script 中的一段文字")
-    ap.add_argument("--propagator", help="追加传播用的 Propagator 名，默认出现次数最多的")
-    ap.add_argument("--obs-col", action="append", help="额外 Report 列，可重复")
-    ap.add_argument("--no-burn-cols", action="store_true", help="不把 burn 分量加进 Report")
-    ap.add_argument("--tol", type=float, default=100.0, help="收敛残差阈值")
-    ap.add_argument("--max-iter", type=int, default=6, help="外层牛顿最大迭代")
-    ap.add_argument("--fd-step", type=float, default=50.0, help="有限差分步长")
-    ap.add_argument("--max-step", type=float, help="单次变量最大变化量（默认按初值 20%% 自动）")
-    ap.add_argument("--set", nargs="+", type=float, help="给定控制值，跳过求解直接验证")
-    ap.add_argument("--verify-only", nargs="+", type=float, help="同 --set")
+                    help='Cut point: auto / none / 1-based line number / a text fragment from the script')
+    ap.add_argument("--propagator", help='Propagator name for the appended propagate; default = most frequent one')
+    ap.add_argument("--obs-col", action="append", help='Extra Report column, repeatable')
+    ap.add_argument("--no-burn-cols", action="store_true", help='Do not add burn components to the Report')
+    ap.add_argument("--tol", type=float, default=100.0, help='Residual tolerance for convergence')
+    ap.add_argument("--max-iter", type=int, default=6, help='Max outer Newton iterations')
+    ap.add_argument("--fd-step", type=float, default=50.0, help='Finite-difference step')
+    ap.add_argument("--max-step", type=float, help='Max per-variable step (default: auto, 20%% of initial value)')
+    ap.add_argument("--set", nargs="+", type=float, help='Given control values; skip solving and verify once')
+    ap.add_argument("--verify-only", nargs="+", type=float, help='Alias of --set')
     ap.add_argument("--start", nargs="+", type=float,
-                    help="外层牛顿的起点（顺序同 --inspect 的 control），默认取 script 原值；用于热启动续算")
+                    help='Outer Newton start point (same order as --inspect controls); defaults to script values; for warm-start continuation')
     ap.add_argument("--scan", nargs=3, type=float, metavar=("E0", "E1", "STEP"),
-                    help="验收：加密历元扫描范围")
-    ap.add_argument("--inspect", action="store_true", help="只解析并打印结构，不调 GMAT")
-    ap.add_argument("--self-test", action="store_true", help="纯 Python 自检，不调 GMAT")
+                    help='Verification: fine epoch scan range')
+    ap.add_argument("--inspect", action="store_true", help='Parse and print structure only; do not call GMAT')
+    ap.add_argument("--self-test", action="store_true", help='Pure-Python self test; do not call GMAT')
     ap.add_argument("--quiet", action="store_true")
     return ap
 
@@ -847,7 +1046,7 @@ def resolve_cut(model, goal, spec):
     for i, l in enumerate(model.lines):
         if spec in l:
             return i
-    print("[WARN] --cut-at 未匹配到任何行，改用 auto")
+    print('[WARN] --cut-at matched no line, falling back to auto')
     return model.auto_cut(goal)
 
 
@@ -858,7 +1057,7 @@ def main(argv=None):
     if a.self_test:
         return self_test()
     if not a.script:
-        ap.error("需要 --script（或用 --self-test）")
+        ap.error('--script is required (or use --self-test)')
 
     m = ScriptModel(a.script)
     ctrl_t = m.control_target()
@@ -872,7 +1071,7 @@ def main(argv=None):
         for f in a.control:
             hit = [ac for ac in pool if ac.field == f and ac.line_no < cut_at]
             if not hit:
-                ap.error("--control 字段在截断点之前找不到: %s" % f)
+                ap.error('--control field not found before the cut point: %s' % f)
             controls.append(hit[-1])
     else:
         controls = ctrl_t.achieves
@@ -883,7 +1082,7 @@ def main(argv=None):
         gf, gv = [], []
         for s in a.goal:
             if "=" not in s:
-                ap.error("--goal 需写成 FIELD=VALUE，收到 %s" % s)
+                ap.error('--goal must be FIELD=VALUE, got %s' % s)
             f, v = s.split("=", 1)
             gf.append(f.strip())
             gv.append(float(v))
@@ -891,7 +1090,7 @@ def main(argv=None):
         gf = [ac.field for ac in goal_t.achieves]
         gv = [ac.value for ac in goal_t.achieves]
     else:
-        ap.error("script 里没有可作为目标的后续 Target 块，请用 --goal FIELD=VALUE 指定")
+        ap.error('No later Target block usable as goal in script; specify it with --goal FIELD=VALUE')
 
     # 历元
     if a.epoch is not None:
@@ -899,36 +1098,36 @@ def main(argv=None):
     else:
         base = m.auto_epoch()
         if base is None:
-            ap.error("script 里没有 TDBModJulian，请用 --epoch 指定评估历元")
+            ap.error('No TDBModJulian in script; specify the evaluation epoch with --epoch')
         epoch = base + a.epoch_from_last
-        print("[WARN] 未给 --epoch，暂用 script 最大 TDBModJulian %s + %s = %s"
+        print('[WARN] --epoch not given; using max TDBModJulian %s + %s = %s'
               % (fmt(base), fmt(a.epoch_from_last), fmt(epoch)))
-        print("       末端到达历元通常不在这个位置，务必用 --epoch 给正确值（沿用 script 的单位）。")
+        print('       The terminal arrival epoch is usually elsewhere; pass the correct value with --epoch (same units as the script).')
 
     print("=" * 78)
-    print("GMAT 外层打靶 / 自动发现结果")
+    print('GMAT outer-loop targeting / auto-discovery')
     print("=" * 78)
     print("script       : %s (md5 %s)" % (m.path, m.md5))
     print("Spacecraft   : %s    Propagator: %s %s"
           % (m.spacecraft, m.propagator, m.prop_counts))
-    print("Target 块    : %d 个" % len(m.targets))
+    print('Target blocks : %d' % len(m.targets))
     for t in m.targets:
         print("   %s  %s" % ("CTRL" if t is ctrl_t else ("GOAL" if t is goal_t else "    "), t))
-    print("控制量 x (%d) : %s" % (len(controls), ", ".join("%s=%s" % (c.field, fmt(c.value)) for c in controls)))
-    print("目标   y*(%d) : %s" % (len(gf), ", ".join("%s=%s" % (f, fmt(v)) for f, v in zip(gf, gv))))
-    print("截断点       : 第 %d 行 (保留 1..%d，丢弃 %d..%d)"
+    print('Controls x (%d) : %s' % (len(controls), ", ".join("%s=%s" % (c.field, fmt(c.value)) for c in controls)))
+    print('Goals   y*(%d) : %s' % (len(gf), ", ".join("%s=%s" % (f, fmt(v)) for f, v in zip(gf, gv))))
+    print('Cut point    : line %d (keep 1..%d, drop %d..%d)'
           % (cut_at + 1, cut_at, cut_at + 1, len(m.lines)))
-    print("评估历元     : %s" % fmt(epoch))
+    print('Eval epoch   : %s' % fmt(epoch))
     pre_cols = ([m.spacecraft + ".TDBModJulian"] + gf + m.xyz_cols(gf)
                 + ([] if a.no_burn_cols else m.burn_cols(ctrl_t))
                 + [c for c in (a.obs_col or []) if c not in gf])
-    print("报告列(推断) : %s" % " ".join(pre_cols))
+    print('Report cols  : %s' % " ".join(pre_cols))
     if goal_t is None:
-        print("[提示] script 里没有后续 Target 块，目标由 --goal 指定；默认不截断，")
-        print("       会保留原序列全部传播。若末尾已有目标段传播，请用 --cut-at 指定截断点。")
+        print('[NOTE] No later Target block; goals come from --goal and no truncation is applied by default, ')
+        print('       so the full original sequence is kept. If the tail already propagates to the goal, set --cut-at explicitly.')
 
     if a.inspect:
-        print("\n(--inspect 模式，未调用 GMAT)")
+        print('\n(--inspect mode; GMAT was not called)')
         return 0
 
     wd = Path(a.workdir) if a.workdir else Path(tempfile.mkdtemp(prefix="gmat_outer_"))
@@ -938,10 +1137,20 @@ def main(argv=None):
     b._goal_achieves = [type("A", (), {"field": f}) for f in gf]
     b._ctrl_target = ctrl_t
 
-    runner = GmatRunner(console=a.gmat_console, root=a.gmat_root,
-                        workdir=wd, timeout=a.timeout)
-    print("GMAT 控制台  : %s" % runner.console)
-    print("临时目录     : %s" % wd)
+    if a.backend == "gmatpy":
+        runner = GmatPyRunner(root=a.gmat_root, workdir=wd, timeout=a.timeout)
+    elif a.backend == "console":
+        runner = GmatRunner(console=a.gmat_console, root=a.gmat_root,
+                            workdir=wd, timeout=a.timeout)
+    else:
+        try:
+            runner = GmatRunner(console=a.gmat_console, root=a.gmat_root,
+                                workdir=wd, timeout=a.timeout)
+        except FileNotFoundError:
+            print('[INFO] GmatConsole not found; falling back to gmatpy (Python API) backend.')
+            runner = GmatPyRunner(root=a.gmat_root, workdir=wd, timeout=a.timeout)
+    print('GMAT backend : %s' % runner.label)
+    print('Work dir     : %s' % wd)
     print("=" * 78)
 
     ot = OuterTargeter(m, b, runner, controls, gf, gv, epoch,
@@ -950,10 +1159,10 @@ def main(argv=None):
     given = a.verify_only or a.set
     if given:
         # 单次验证
-        print("\n=== 单次验证（--verify-only）===")
+        print('\n=== Single verification (--verify-only) ===')
         y, res, cols = ot.probe(given, "verify")
         if y is None:
-            print("运行失败：")
+            print('Run failed:')
             for l in res.errors():
                 print("  ", l)
             return 2
@@ -961,9 +1170,9 @@ def main(argv=None):
         print("x     = %s" % [fmt(v) for v in given])
         print("y     = %s" % [fmt(v) for v in y])
         print("y*    = %s" % [fmt(v) for v in gv])
-        print("残差  = %s  |d| = %.6g km" % ([fmt(v) for v in d], norm(d)))
-        print("EXIT=%s  打靶收敛=%d  Mission run completed=%s"
-              % (res.rc, res.converged, "Mission run completed" in res.out))
+        print('residual = %s  |d| = %.6g km' % ([fmt(v) for v in d], norm(d)))
+        print('EXIT=%s  targeter converged=%d  run OK=%s'
+              % (res.rc, res.converged, res.ok))
         if a.scan:
             verify_scan(ot, given, *a.scan)
         print_plan(m, controls, given, gv, cut_at, len(m.lines), epoch, res, y)
@@ -974,10 +1183,10 @@ def main(argv=None):
     x_start = list(a.start) if a.start else x0
     if a.start:
         if len(x_start) != len(controls):
-            ap.error("--start 需要 %d 个值，收到 %d" % (len(controls), len(x_start)))
-        print("\n热启动：x_start = %s" % [fmt(v) for v in x_start])
+            ap.error('--start needs %d values, got %d' % (len(controls), len(x_start)))
+        print('\nWarm start: x_start = %s' % [fmt(v) for v in x_start])
     x, y, res = ot.solve(x_start)
-    print("\n求解完成：%d 次 GMAT 调用，用时 %.1f s" % (ot.calls, time.time() - t0))
+    print('\nSolve done: %d GMAT calls, %.1f s' % (ot.calls, time.time() - t0))
     print("FINAL x = %s" % [fmt(v) for v in x])
     if y is None:
         # 用最终值再验一次，拿到 y 与 res
