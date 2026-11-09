@@ -13,7 +13,7 @@
 | `step5_捕获段误差分析.py`            | §1.5.4      | 恒角速度标称捕获 + 测量/执行/姿态三类误差蒙特卡洛                                                                                                      | scipy                 |
 | `step6_引力辅助修正与EMEJ桥接.py`      | §3.4        | 书链（火借力→Flora 微分修正）+ 二体序列桥接到精确星历，出 GMAT CSV                                                                                       | scipy + 星历            |
 | `step7_EMEJ借力优化导出.py`         | —           | pykep MGA-1DSM（地火地木）SADE 优化 + 导出 nodes.json                                                                                      | pykep + pygmo         |
-| `step8v4.py`                  | §3.4        | 纯 MGA 借力优化：飞越近心点零脉冲（rp 为输出量）、圈数 k 整数基因、直飞与谐振同场竞争；pykep 2.6/3.x 自适应、文昌几何后检与 chain-close 发射窗口分层扫描、`--polish` 精修、`--eph de421` 精确星历 | pykep + pygmo + scipy |
+| `step8v4.py`                  | —        | 纯 MGA 借力优化：飞越近心点零脉冲（rp 为输出量）、圈数 k 整数基因、直飞与谐振同场竞争；pykep 2.6/3.x 自适应、文昌几何后检与 chain-close 发射窗口分层扫描、`--polish` 精修、`--eph de421` 精确星历 | pykep + pygmo + scipy |
 | `step9_复现验证_skippingstone.py` | —           | 逐段复算 Skipping_stone 的 E-V-E-E-J：Lambert 多圈 + 前向瞄准打靶 + 病态程度 + 自由搜索                                                                | pykep + scipy         |
 | `step10.py`                   | —           | GMAT 外层打靶：把内层微分校正器当黑箱 y=f(x)，只调最后一根腿的 Achieve 值，有限差分 + 阻尼牛顿/Broyden 收敛，只 print 改哪几行                                              | 纯标准库 + GMAT R2022a    |
 
